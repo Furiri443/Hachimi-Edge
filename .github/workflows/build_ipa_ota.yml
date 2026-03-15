@@ -2,23 +2,21 @@ name: Build IPA (Patch + Sign + OTA)
 
 # ──────────────────────────────────────────────────────────────────
 # Trigger: manual workflow dispatch only.
-# No GitHub Releases created — IPA and manifest are hosted on
-# transfer.sh (public HTTPS, 14-day expiry). Link output appears
-# in the Job Summary immediately after the run finishes.
+# Uses bradyjoslin/ios-resign-action to re-sign the patched IPA.
+# IPA and manifest are hosted on transfer.sh (14-day expiry).
+# Link output appears in the Job Summary after the run finishes.
 # ──────────────────────────────────────────────────────────────────
 #
 # Required GitHub Secrets (Settings → Secrets → Actions):
-#   IOS_P12_BASE64          base64 -w0 YourCert.p12
-#   IOS_P12_PASSWORD        P12 export password
-#   IOS_PROVISION_BASE64    base64 -w0 YourProfile.mobileprovision
-#   IOS_TEAM_ID             Apple Team ID  (e.g. ABCDE12345)
-#   IOS_BUNDLE_ID           Bundle ID      (e.g. jp.co.cygames.umamusume)
-#   IOS_CODE_SIGN_IDENTITY  Signing identity CN
-#                           e.g. "iPhone Distribution: Your Name (ABCDE12345)"
+#   P12_BASE64              base64 -w0 YourCert.p12
+#   P12_PASSWORD            P12 export password
+#   PROVISION_BASE64        base64 -w0 YourProfile.mobileprovision
+#   SIGNING_IDENTITY        e.g. "Apple Distribution: Your Name (TEAMID)"
+#   TEAM_ID                 Apple Team ID  (e.g. ABCDE12345)
+#   BUNDLE_ID               Bundle ID      (e.g. jp.co.cygames.umamusume)
 #
 # Inputs (on each run):
 #   ipa_url      — temporary URL to the original game IPA (not stored)
-#   app_version  — version string written into OTA manifest
 # ──────────────────────────────────────────────────────────────────
 
 on:
@@ -38,43 +36,20 @@ on:
         required: false
         default: true
         type: boolean
-      p12_url:
-        description: 'URL to custom P12 certificate (optional)'
-        required: false
-        type: string
-      p12_password:
-        description: 'Password for custom P12 (optional)'
-        required: false
-        type: string
-      provision_url:
-        description: 'URL to custom mobileprovision (optional)'
-        required: false
-        type: string
-      bundle_id:
-        description: 'Custom Bundle ID (optional, e.g. jp.co.cygames.umamusume)'
-        required: false
-        type: string
-      team_id:
-        description: 'Apple Team ID (optional, e.g. ABCDE12345)'
-        required: false
-        type: string
-      codesign_identity:
-        description: 'Signing identity CN (optional)'
-        required: false
-        type: string
 
 permissions:
-  contents: read   # read-only — no releases, no writes to repo
+  contents: read
 
 jobs:
   patch-sign-ota:
     runs-on: macos-latest
+    environment:
+      name: BuildiOS
     timeout-minutes: 30
 
     steps:
       # ── 1. Checkout (for inject_ipa.sh) ──────────────────────────
       - uses: actions/checkout@v4
-
 
       # ── 2. Download latest libhachimi.dylib from Build iOS ────────
       - name: Download iOS dylib artifact
@@ -154,7 +129,6 @@ jobs:
             "$GITHUB_WORKSPACE/patched_unsigned.ipa"
           echo "Patched: $(du -sh "$GITHUB_WORKSPACE/patched_unsigned.ipa" | cut -f1)"
 
-
       # ── 6. Patch Info.plist (display name + Files sharing) ────────
       - name: Patch Info.plist
         env:
@@ -205,138 +179,33 @@ jobs:
           echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
           echo "Detected app version: $APP_VERSION"
 
-      - name: Import certificate & provisioning profile
-        env:
-          P12_URL:          ${{ inputs.p12_url }}
-          P12_PASSWORD_IN:  ${{ inputs.p12_password }}
-          PROVISION_URL:    ${{ inputs.provision_url }}
-          P12_BASE64:       ${{ secrets.IOS_P12_BASE64 }}
-          P12_PASSWORD_SEC: ${{ secrets.IOS_P12_PASSWORD }}
-          PROVISION_BASE64: ${{ secrets.IOS_PROVISION_BASE64 }}
-          BUNDLE_ID_IN:     ${{ inputs.bundle_id }}
-          TEAM_ID_IN:       ${{ inputs.team_id }}
-          IDENTITY_IN:      ${{ inputs.codesign_identity }}
-          BUNDLE_ID_SEC:    ${{ secrets.IOS_BUNDLE_ID }}
-          TEAM_ID_SEC:      ${{ secrets.IOS_TEAM_ID }}
-          IDENTITY_SEC:     ${{ secrets.IOS_CODE_SIGN_IDENTITY }}
+      # ── 7. Re-sign IPA using ios-resign-action (ad-hoc) ──────────
+      - name: Re-sign IPA (ad-hoc)
+        uses: bradyjoslin/ios-resign-action@v1
+        with:
+          ipa_path: patched_unsigned.ipa
+          mobileprovision: ${{ secrets.PROVISION_BASE64 }}
+          cert_p12: ${{ secrets.P12_BASE64 }}
+          p12_pass: ${{ secrets.P12_PASSWORD }}
+          signing_identity: ${{ secrets.SIGNING_IDENTITY }}
+
+      - name: Prepare signed IPA
         run: |
-          # 1. Handle P12 certificate
-          if [[ -n "$P12_URL" ]]; then
-            echo "Downloading P12 from URL..."
-            curl -fsSL "$P12_URL" -o /tmp/cert.p12
-          else
-            echo "Using P12 from secrets..."
-            printf '%s' "$P12_BASE64" | base64 --decode > /tmp/cert.p12
-          fi
-
-          # 2. Handle Provisioning Profile
-          if [[ -n "$PROVISION_URL" ]]; then
-            echo "Downloading profile from URL..."
-            curl -fsSL "$PROVISION_URL" -o /tmp/profile.mobileprovision
-          else
-            echo "Using profile from secrets..."
-            printf '%s' "$PROVISION_BASE64" | base64 --decode > /tmp/profile.mobileprovision
-          fi
-
-          # 3. Handle P12 Password
-          P12_PASSWORD="${P12_PASSWORD_IN:-$P12_PASSWORD_SEC}"
-          echo "P12_PASSWORD=$P12_PASSWORD" >> $GITHUB_ENV
-
-          # 4. Handle signing identities for later steps
-          echo "BUNDLE_ID=${BUNDLE_ID_IN:-$BUNDLE_ID_SEC}" >> $GITHUB_ENV
-          echo "TEAM_ID=${TEAM_ID_IN:-$TEAM_ID_SEC}"       >> $GITHUB_ENV
-          echo "IDENTITY=${IDENTITY_IN:-$IDENTITY_SEC}"   >> $GITHUB_ENV
-
-          # Validate files are non-empty
-          P12_SIZE=$(stat -f%z /tmp/cert.p12 2>/dev/null || echo 0)
-          PROV_SIZE=$(stat -f%z /tmp/profile.mobileprovision 2>/dev/null || echo 0)
-          echo "P12 size: $P12_SIZE bytes | Profile size: $PROV_SIZE bytes"
-          [[ "$P12_SIZE"   -gt 100 ]] || { echo "❌ P12 is empty or invalid"; exit 1; }
-          [[ "$PROV_SIZE"  -gt 100 ]] || { echo "❌ Provisioning profile is empty or invalid"; exit 1; }
-
-          # Temporary keychain (random password, auto-deleted at end)
-          KC_PASS=$(openssl rand -hex 20)
-          security create-keychain -p "$KC_PASS" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain  -p "$KC_PASS" build.keychain
-          security set-keychain-settings -t 3600 -u build.keychain
-
-          security import /tmp/cert.p12 \
-            -k build.keychain \
-            -P "$P12_PASSWORD" \
-            -T /usr/bin/codesign \
-            -f pkcs12 \
-            -A
-          security set-key-partition-list \
-            -S apple-tool:,apple:,codesign: \
-            -s -k "$KC_PASS" build.keychain
-
-          # Install provisioning profile under its UUID
-          PROFILE_UUID=$(
-            /usr/libexec/PlistBuddy -c 'Print :UUID' \
-              /dev/stdin <<< "$(security cms -D -i /tmp/profile.mobileprovision)"
-          )
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp /tmp/profile.mobileprovision \
-            ~/Library/MobileDevice/Provisioning\ Profiles/"${PROFILE_UUID}.mobileprovision"
-          echo "PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
-          echo "KC_PASS=$KC_PASS"           >> $GITHUB_ENV
-
-
-          # Shred temp files immediately
-          rm -f /tmp/cert.p12 /tmp/profile.mobileprovision
-
-      # ── 7. Re-sign IPA with paid certificate ─────────────────────
-      - name: Sign IPA with paid certificate
-        env:
-          IDENTITY:  ${{ env.IDENTITY }}
-          BUNDLE_ID: ${{ env.BUNDLE_ID }}
-          TEAM_ID:   ${{ env.TEAM_ID }}
-        run: |
-          WORK=$(mktemp -d /tmp/sign.XXXXXX)
-          unzip -q patched_unsigned.ipa -d "$WORK"
-          APP=$(find "$WORK/Payload" -maxdepth 1 -name "*.app" | head -1)
-          APPNAME=$(basename "$APP" .app)
-          echo "Signing: $APP"
-
-          # Entitlements: JIT + skip-library-validation (needed for Dobby)
-          cat > /tmp/ent.plist <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>application-identifier</key><string>${TEAM_ID}.${BUNDLE_ID}</string>
-            <key>com.apple.developer.team-identifier</key><string>${TEAM_ID}</string>
-            <key>get-task-allow</key><false/>
-            <key>com.apple.security.cs.allow-jit</key><true/>
-            <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
-            <key>com.apple.private.skip-library-validation</key><true/>
-          </dict></plist>
-          PLIST
-
-          # Embed provisioning profile
-          cp ~/Library/MobileDevice/Provisioning\ Profiles/"${PROFILE_UUID}.mobileprovision" \
-            "$APP/embedded.mobileprovision"
-
-          # Sign dylib first (inner → outer)
-          codesign --force --sign "$IDENTITY" \
-            "$APP/Frameworks/libhachimi.dylib"
-
-          # Sign main bundle
-          codesign --force --sign "$IDENTITY" \
-            --entitlements /tmp/ent.plist \
-            --timestamp=none \
-            "$APP"
-
-          # Verify
-          codesign --verify --deep --strict "$APP" && echo "✅ Signature valid"
-
-          # Repack
-          (cd "$WORK" && zip -qr "$GITHUB_WORKSPACE/signed.ipa" Payload)
-          rm -rf "$WORK" /tmp/ent.plist
+          # ios-resign-action re-signs in-place
+          cp patched_unsigned.ipa signed.ipa
           echo "Signed IPA: $(du -sh signed.ipa | cut -f1)"
+          # Verify signature
+          WORK=$(mktemp -d /tmp/verify.XXXXXX)
+          unzip -q signed.ipa -d "$WORK"
+          APP=$(find "$WORK/Payload" -maxdepth 1 -name "*.app" | head -1)
+          codesign --verify --deep --strict "$APP" && echo "✅ Signature valid" || echo "⚠️ Signature check failed"
+          rm -rf "$WORK"
 
       # ── 8. Upload to transfer.sh ──────────────────────────────────
       - name: Upload IPA to transfer.sh (14-day link)
+        env:
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+          APP_DISPLAY_NAME: ${{ inputs.app_display_name }}
         run: |
           RUN_ID="${{ github.run_id }}"
 
@@ -347,36 +216,49 @@ jobs:
           echo "IPA_URL=$IPA_URL" >> $GITHUB_ENV
           echo "IPA_URL: $IPA_URL"
 
-          # Generate OTA manifest pointing to IPA
-          cat > manifest.plist <<PLIST
+          # Generate OTA manifest for itms-services
+          cat > manifest.plist <<'MANIFEST_EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>items</key>
-            <array>
-              <dict>
-                <key>assets</key>
-                <array>
+              <key>items</key>
+              <array>
                   <dict>
-                    <key>kind</key><string>software-package</string>
-                    <key>url</key><string>${IPA_URL}</string>
+                      <key>assets</key>
+                      <array>
+                          <dict>
+                              <key>kind</key>
+                              <string>software-package</string>
+                              <key>url</key>
+                              <string>__IPA_URL__</string>
+                          </dict>
+                      </array>
+                      <key>metadata</key>
+                      <dict>
+                          <key>bundle-identifier</key>
+                          <string>__BUNDLE_ID__</string>
+                          <key>bundle-version</key>
+                          <string>__APP_VERSION__</string>
+                          <key>kind</key>
+                          <string>software</string>
+                          <key>title</key>
+                          <string>__DISPLAY_NAME__</string>
+                      </dict>
                   </dict>
-                </array>
-                <key>metadata</key>
-                <dict>
-                  <key>bundle-identifier</key>
-                  <string>${BUNDLE_ID}</string>
-                  <key>bundle-version</key>
-                  <string>${APP_VERSION}</string>
-                  <key>kind</key><string>software</string>
-                  <key>title</key><string>Uma Musume + Hachimi</string>
-                </dict>
-              </dict>
-            </array>
+              </array>
           </dict>
           </plist>
-          PLIST
+          MANIFEST_EOF
+
+          # Replace placeholders with actual values
+          DISPLAY="${APP_DISPLAY_NAME:-Uma Musume + Hachimi}"
+          sed -i '' \
+            -e "s|__IPA_URL__|${IPA_URL}|g" \
+            -e "s|__BUNDLE_ID__|${BUNDLE_ID}|g" \
+            -e "s|__APP_VERSION__|${APP_VERSION}|g" \
+            -e "s|__DISPLAY_NAME__|${DISPLAY}|g" \
+            manifest.plist
 
           # Upload manifest
           MANIFEST_URL=$(curl -fsSL \
@@ -416,8 +298,3 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---"
           echo "OTA LINK → $OTA_LINK"
-
-      # ── 11. Cleanup keychain ───────────────────────────────────────
-      - name: Cleanup keychain
-        if: always()
-        run: security delete-keychain build.keychain 2>/dev/null || true
