@@ -56,9 +56,6 @@ jobs:
           unzip -t original.ipa > /dev/null 2>&1 || { echo "ERROR: Invalid IPA"; exit 1; }
 
       - name: Install Injection Tools
-        run: brew install ldid insert_dylib
-
-      - name: Install Injection Tools
         run: |
           # 1. Cài đặt ldid qua Homebrew (ldid có sẵn trong thư viện chuẩn)
           brew install ldid
