@@ -133,37 +133,32 @@ jobs:
           rm -f patched_unsigned.ipa
           (cd "$PLIST_WORK" && zip -qr "$GITHUB_WORKSPACE/patched_unsigned.ipa" Payload)
 
-      - name: Fix P12 Legacy Compatibility
-        env:
-          P12_B64: ${{ secrets.P12_BASE64 }}
-          P12_PASS: ${{ secrets.P12_PASSWORD }}
-        run: |
-          # 1. Giải mã Secret Base64 ra file P12 gốc
-          echo "$P12_B64" | base64 -d > original_cert.p12
-          
-          # 2. Extract toàn bộ chứng chỉ và key ra định dạng PEM (mở khóa bằng pass)
-          openssl pkcs12 -in original_cert.p12 -passin "pass:$P12_PASS" -nodes -out temp_cert.pem
-          
-          # 3. Đóng gói lại thành file P12 mới (LibreSSL mặc định dùng chuẩn cũ, không cần -legacy)
-          openssl pkcs12 -export -in temp_cert.pem -out legacy_cert.p12 -passout "pass:$P12_PASS"
-          
-          # 4. Mã hóa lại thành Base64 và lưu vào biến môi trường cho bước sau
-          LEGACY_P12_B64=$(base64 -i legacy_cert.p12 | tr -d '\n')
-          echo "LEGACY_P12_B64=$LEGACY_P12_B64" >> $GITHUB_ENV
-          
-          # 5. Dọn dẹp file nhạy cảm
-          rm original_cert.p12 temp_cert.pem legacy_cert.p12
-
-      # 👇 SỬA LẠI BƯỚC RE-SIGN IPA 👇
-      - name: Re-sign IPA
-        uses: bradyjoslin/ios-resign-action@v1
+      - name: 🍏 Import Apple Certificate
+        uses: apple-actions/import-codesign-certs@v3
         with:
-          ipa_path: patched_unsigned.ipa
-          # Chuyển sang dùng biến môi trường vừa tạo thay vì dùng secret gốc
-          p12_base64: ${{ env.LEGACY_P12_B64 }}
-          p12_password: ${{ secrets.P12_PASSWORD }}
-          mobileprovision_base64: ${{ secrets.PROVISION_BASE64 }}
-          bundle_id: ${{ env.BUNDLE_ID }}
+          p12-file-base64: ${{ secrets.P12_BASE64 }}
+          p12-password: ${{ secrets.P12_PASSWORD }}
+
+      - name: 🚀 Re-sign IPA with Fastlane
+        env:
+          PROVISION_B64: ${{ secrets.PROVISION_BASE64 }}
+          BUNDLE_ID: ${{ env.BUNDLE_ID }}
+        run: |
+          # 1. Giải mã Provisioning Profile (có bộ lọc tr -d '\n\r ' để chống lỗi khoảng trắng từ Windows)
+          echo "$PROVISION_B64" | tr -d '\n\r ' | base64 -d > profile.mobileprovision
+          
+          # Kiểm tra file có bị rỗng do copy sai Secret không
+          if [ ! -s profile.mobileprovision ]; then
+            echo "❌ LỖI: Không thể giải mã Provisioning Profile. Vui lòng kiểm tra lại Secret PROVISION_BASE64."
+            exit 1
+          fi
+          echo "✅ Đã giải mã Provisioning Profile thành công"
+
+          # 2. Chạy lệnh Resign của Fastlane (Tự động nhận diện chứng chỉ trong hệ thống)
+          fastlane run resign \
+            ipa:"patched_unsigned.ipa" \
+            provisioning_profile:"profile.mobileprovision" \
+            bundle_id:"$BUNDLE_ID"
 
       - name: Upload to transfer.sh (OTA Link)
         run: |
