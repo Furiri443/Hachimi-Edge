@@ -168,6 +168,11 @@ jobs:
           # Convert to XML if binary
           plutil -convert xml1 "$PLIST"
 
+          # 0. Remove PlugIns and Watch directories to avoid ad-hoc signing errors for nested extensions
+          rm -rf "$PLIST_WORK"/Payload/*.app/PlugIns
+          rm -rf "$PLIST_WORK"/Payload/*.app/Watch
+          echo "Removed nested extensions (PlugIns, Watch) to simplify signing"
+
           # 1. Custom display name (only if provided)
           if [[ -n "$DISPLAY_NAME" ]]; then
             /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $DISPLAY_NAME" "$PLIST" 2>/dev/null \
