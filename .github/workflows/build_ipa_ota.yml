@@ -133,11 +133,34 @@ jobs:
           rm -f patched_unsigned.ipa
           (cd "$PLIST_WORK" && zip -qr "$GITHUB_WORKSPACE/patched_unsigned.ipa" Payload)
 
+      - name: Fix P12 Legacy Compatibility
+        env:
+          P12_B64: ${{ secrets.P12_BASE64 }}
+          P12_PASS: ${{ secrets.P12_PASSWORD }}
+        run: |
+          # 1. Giải mã Secret Base64 ra file P12 gốc
+          echo "$P12_B64" | base64 -d > original_cert.p12
+          
+          # 2. Extract toàn bộ chứng chỉ và key ra định dạng PEM (mở khóa bằng pass)
+          openssl pkcs12 -in original_cert.p12 -passin "pass:$P12_PASS" -nodes -out temp_cert.pem
+          
+          # 3. Đóng gói lại thành file P12 mới với cờ -legacy để macOS đọc được
+          openssl pkcs12 -export -in temp_cert.pem -out legacy_cert.p12 -passout "pass:$P12_PASS" -legacy
+          
+          # 4. Mã hóa lại thành Base64 và lưu vào biến môi trường cho bước sau
+          LEGACY_P12_B64=$(base64 -i legacy_cert.p12 | tr -d '\n')
+          echo "LEGACY_P12_B64=$LEGACY_P12_B64" >> $GITHUB_ENV
+          
+          # 5. Dọn dẹp file nhạy cảm
+          rm original_cert.p12 temp_cert.pem legacy_cert.p12
+
+      # 👇 SỬA LẠI BƯỚC RE-SIGN IPA 👇
       - name: Re-sign IPA
         uses: bradyjoslin/ios-resign-action@v1
         with:
           ipa_path: patched_unsigned.ipa
-          p12_base64: ${{ secrets.P12_BASE64 }}
+          # Chuyển sang dùng biến môi trường vừa tạo thay vì dùng secret gốc
+          p12_base64: ${{ env.LEGACY_P12_B64 }}
           p12_password: ${{ secrets.P12_PASSWORD }}
           mobileprovision_base64: ${{ secrets.PROVISION_BASE64 }}
           bundle_id: ${{ env.BUNDLE_ID }}
