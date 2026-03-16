@@ -144,8 +144,8 @@ jobs:
           # 2. Extract toàn bộ chứng chỉ và key ra định dạng PEM (mở khóa bằng pass)
           openssl pkcs12 -in original_cert.p12 -passin "pass:$P12_PASS" -nodes -out temp_cert.pem
           
-          # 3. Đóng gói lại thành file P12 mới với cờ -legacy để macOS đọc được
-          openssl pkcs12 -export -in temp_cert.pem -out legacy_cert.p12 -passout "pass:$P12_PASS" -legacy
+          # 3. Đóng gói lại thành file P12 mới (LibreSSL mặc định dùng chuẩn cũ, không cần -legacy)
+          openssl pkcs12 -export -in temp_cert.pem -out legacy_cert.p12 -passout "pass:$P12_PASS"
           
           # 4. Mã hóa lại thành Base64 và lưu vào biến môi trường cho bước sau
           LEGACY_P12_B64=$(base64 -i legacy_cert.p12 | tr -d '\n')
