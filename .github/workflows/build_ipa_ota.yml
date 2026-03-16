@@ -71,14 +71,35 @@ jobs:
           
           # 4. Kiểm tra cài đặt
           insert_dylib || echo "insert_dylib ready!"
+      - name: Inject dylib into IPA
+        run: |
+          chmod +x tools/ios/inject_ipa.sh
+          
+          # Sử dụng đường dẫn tuyệt đối để đảm bảo file lưu đúng chỗ
+          tools/ios/inject_ipa.sh \
+            "$GITHUB_WORKSPACE/original.ipa" \
+            "$GITHUB_WORKSPACE/artifacts/libhachimi.dylib" \
+            "$GITHUB_WORKSPACE/patched_unsigned.ipa"
+            
+          # Dừng ngay Action báo lỗi đỏ nếu script trên chạy thất bại không ra file
+          if [ ! -f "$GITHUB_WORKSPACE/patched_unsigned.ipa" ]; then
+            echo "❌ LỖI NGHIÊM TRỌNG: inject_ipa.sh không tạo ra được file patched_unsigned.ipa!"
+            echo "Vui lòng cuộn lên kiểm tra log của script inject xem có lỗi gì xảy ra."
+            exit 1
+          fi
+          echo "✅ Đã tạo thành công patched_unsigned.ipa"
+
       - name: Clean & Patch Info.plist
         env:
           DISPLAY_NAME: ${{ inputs.app_display_name }}
           FILES_SHARING: ${{ inputs.enable_files_sharing }}
           CUSTOM_BUNDLE_ID: ${{ inputs.bundle_id }}
         run: |
-          # Xóa các App Extension gây lỗi signing
-          zip -d patched_unsigned.ipa "Payload/*.app/PlugIns/*" "Payload/*.app/PlugIns" "Payload/*.app/Watch/*" "Payload/*.app/Watch" || true
+          # Đảm bảo đang đứng ở đúng thư mục gốc chứa file
+          cd "$GITHUB_WORKSPACE"
+          
+          # Xóa các App Extension gây lỗi signing (Nếu không có thì báo qua, không lỗi)
+          zip -d patched_unsigned.ipa "Payload/*.app/PlugIns/*" "Payload/*.app/PlugIns" "Payload/*.app/Watch/*" "Payload/*.app/Watch" || echo "Không có PlugIns/Watch để xóa"
           
           PLIST_WORK=$(mktemp -d)
           unzip -q patched_unsigned.ipa -d "$PLIST_WORK"
@@ -108,7 +129,7 @@ jobs:
           APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST" 2>/dev/null || echo "1.0")
           echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
           
-          # Đóng gói lại file IPA
+          # Xóa file cũ và Đóng gói lại
           rm -f patched_unsigned.ipa
           (cd "$PLIST_WORK" && zip -qr "$GITHUB_WORKSPACE/patched_unsigned.ipa" Payload)
 
