@@ -133,11 +133,55 @@ jobs:
           rm -f patched_unsigned.ipa
           (cd "$PLIST_WORK" && zip -qr "$GITHUB_WORKSPACE/patched_unsigned.ipa" Payload)
 
+      - name: 🚑 Fix & Validate P12 Certificate
+        env:
+          P12_B64: ${{ secrets.P12_BASE64 }}
+          P12_PASS: ${{ secrets.P12_PASSWORD }}
+        run: |
+          echo "Cài đặt công cụ OpenSSL chuẩn..."
+          brew install openssl
+          OPENSSL_BIN="$(brew --prefix openssl)/bin/openssl"
+          
+          # 1. Giải mã Base64 (Lọc sạch mọi ký tự rác/xuống dòng từ Windows)
+          echo "$P12_B64" | tr -d '\n\r ' | base64 -d > cert.p12
+          
+          # 2. Kiểm tra tính hợp lệ của file và mật khẩu
+          echo "Đang kiểm tra chứng chỉ..."
+          if ! $OPENSSL_BIN pkcs12 -info -in cert.p12 -noout -passin "pass:$P12_PASS" 2>/dev/null; then
+            echo "❌ LỖI NGHIÊM TRỌNG: Mật khẩu P12_PASSWORD bị sai, HOẶC file Base64 đã bị hỏng!"
+            exit 1
+          fi
+          echo "✅ Mật khẩu và file chứng chỉ hoàn toàn chính xác!"
+          
+          # 3. Ép kiểu mã hóa về chuẩn cổ điển của Apple Keychain (RC2/3DES)
+          echo "Đang ép kiểu mã hóa tương thích với Apple..."
+          $OPENSSL_BIN pkcs12 -in cert.p12 -passin "pass:$P12_PASS" -nodes -out temp.pem 2>/dev/null
+          $OPENSSL_BIN pkcs12 -export -in temp.pem -out legacy.p12 -passout "pass:$P12_PASS" -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 2>/dev/null
+          
+          # 4. Lưu lại Base64 mới để truyền vào Apple Action
+          LEGACY_B64=$(base64 -i legacy.p12 | tr -d '\n')
+          echo "P12_B64_FIXED=$LEGACY_B64" >> $GITHUB_ENV
+          
+          # 5. Dọn dẹp
+          rm cert.p12 temp.pem legacy.p12
+
       - name: 🍏 Import Apple Certificate
         uses: apple-actions/import-codesign-certs@v3
         with:
-          p12-file-base64: ${{ secrets.P12_BASE64 }}
+          # Đã đổi sang dùng file đã được FIX ở bước trên
+          p12-file-base64: ${{ env.P12_B64_FIXED }}
           p12-password: ${{ secrets.P12_PASSWORD }}
+
+      - name: 🚀 Re-sign IPA with Fastlane
+        env:
+          PROVISION_B64: ${{ secrets.PROVISION_BASE64 }}
+          BUNDLE_ID: ${{ env.BUNDLE_ID }}
+        run: |
+          echo "$PROVISION_B64" | tr -d '\n\r ' | base64 -d > profile.mobileprovision
+          fastlane run resign \
+            ipa:"patched_unsigned.ipa" \
+            provisioning_profile:"profile.mobileprovision" \
+            bundle_id:"$BUNDLE_ID"
 
       - name: 🚀 Re-sign IPA with Fastlane
         env:
