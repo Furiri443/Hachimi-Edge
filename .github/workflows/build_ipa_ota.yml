@@ -36,6 +36,30 @@ on:
         required: false
         default: true
         type: boolean
+      p12_url:
+        description: 'Direct download URL for .p12 certificate (optional)'
+        required: false
+        type: string
+      p12_password:
+        description: 'P12 export password (optional, overrides secret)'
+        required: false
+        type: string
+      provision_url:
+        description: 'Direct download URL for .mobileprovision (optional)'
+        required: false
+        type: string
+      signing_identity:
+        description: 'Signing Identity (e.g. "Apple Distribution: Name (ID)")'
+        required: false
+        type: string
+      team_id:
+        description: 'Apple Team ID (e.g. ABCDE12345)'
+        required: false
+        type: string
+      bundle_id:
+        description: 'Override Bundle ID (optional)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -179,15 +203,89 @@ jobs:
           echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
           echo "Detected app version: $APP_VERSION"
 
-      # ── 7. Re-sign IPA using ios-resign-action (ad-hoc) ──────────
+      # ── 7. Prepare Signing Assets ─────────────────────────────────
+      - name: Prepare Signing Assets
+        env:
+          P12_URL: ${{ inputs.p12_url }}
+          P12_PASS: ${{ inputs.p12_password || secrets.P12_PASSWORD || secrets.IOS_P12_PASSWORD }}
+          PROVISION_URL: ${{ inputs.provision_url }}
+          SIGNING_IDENTITY: ${{ inputs.signing_identity || secrets.SIGNING_IDENTITY || secrets.IOS_CODE_SIGN_IDENTITY }}
+          TEAM_ID: ${{ inputs.team_id || secrets.TEAM_ID || secrets.IOS_TEAM_ID }}
+          BUNDLE_ID: ${{ inputs.bundle_id || secrets.BUNDLE_ID || secrets.IOS_BUNDLE_ID }}
+          # Fallback secrets if URLs not used
+          P12_B64: ${{ secrets.P12_BASE64 || secrets.IOS_P12_BASE64 }}
+          PROVISION_B64: ${{ secrets.PROVISION_BASE64 || secrets.IOS_PROVISION_BASE64 }}
+        run: |
+          set -e
+
+          # 1. Download or Use Secret for P12
+          if [[ -n "$P12_URL" ]]; then
+            echo "Downloading P12 from URL..."
+            curl -fsSL --max-time 60 -L -o cert.p12 "$P12_URL"
+            # Basic sanity check: check if it's an HTML page (e.g. from Google Drive/Dropbox preview)
+            if grep -q "<!DOCTYPE html>" cert.p12 2>/dev/null; then
+              echo "ERROR: P12_URL returned an HTML page, not a binary file. Check the link."
+              exit 1
+            fi
+          elif [[ -n "$P12_B64" ]]; then
+            echo "Using P12 from secrets..."
+            echo "$P12_B64" | base64 -d > cert.p12
+          else
+            echo "ERROR: No P12 provided (URL or Secret)"
+            exit 1
+          fi
+
+          # 2. Fix 'Unable to decode' by converting to legacy P12 format
+          # macOS 'security' tool often fails with modern PKCS#12 v3 encryption.
+          # We re-export it with legacy encryption to be safe.
+          echo "Converting P12 to legacy format for macOS compatibility..."
+          openssl pkcs12 -in cert.p12 -passin "pass:$P12_PASS" \
+            -export -out cert_legacy.p12 -passout "pass:$P12_PASS" \
+            -legacy 2>/dev/null || {
+              echo "Legacy conversion failed, attempting standard re-export..."
+              openssl pkcs12 -in cert.p12 -passin "pass:$P12_PASS" \
+                -export -out cert_legacy.p12 -passout "pass:$P12_PASS"
+            }
+
+          CERT_P12_FINAL=$(base64 -i cert_legacy.p12 | tr -d '\n')
+          echo "CERT_P12=$CERT_P12_FINAL" >> $GITHUB_ENV
+
+          # 3. Download or Use Secret for Provisioning Profile
+          if [[ -n "$PROVISION_URL" ]]; then
+            echo "Downloading provisioning profile from URL..."
+            curl -fsSL --max-time 60 -L -o profile.mobileprovision "$PROVISION_URL"
+            if grep -q "<!DOCTYPE html>" profile.mobileprovision 2>/dev/null; then
+              echo "ERROR: PROVISION_URL returned an HTML page. Check the link."
+              exit 1
+            fi
+          elif [[ -n "$PROVISION_B64" ]]; then
+            echo "Using provisioning profile from secrets..."
+            echo "$PROVISION_B64" | base64 -d > profile.mobileprovision
+          else
+            echo "ERROR: No provisioning profile provided"
+            exit 1
+          fi
+
+          PROVISION_FINAL=$(base64 -i profile.mobileprovision | tr -d '\n')
+          echo "MOBILEPROVISION=$PROVISION_FINAL" >> $GITHUB_ENV
+
+          # 4. Export other signing variables
+          echo "P12_PASS=$P12_PASS" >> $GITHUB_ENV
+          echo "SIGNING_IDENTITY=$SIGNING_IDENTITY" >> $GITHUB_ENV
+          echo "TEAM_ID=$TEAM_ID" >> $GITHUB_ENV
+          if [[ -n "$BUNDLE_ID" ]]; then
+            echo "BUNDLE_ID=$BUNDLE_ID" >> $GITHUB_ENV
+          fi
+
+      # ── 8. Re-sign IPA using ios-resign-action (ad-hoc) ──────────
       - name: Re-sign IPA (ad-hoc)
         uses: bradyjoslin/ios-resign-action@v1
         with:
           ipa_path: patched_unsigned.ipa
-          mobileprovision: ${{ secrets.PROVISION_BASE64 }}
-          cert_p12: ${{ secrets.P12_BASE64 }}
-          p12_pass: ${{ secrets.P12_PASSWORD }}
-          signing_identity: ${{ secrets.SIGNING_IDENTITY }}
+          mobileprovision: ${{ env.MOBILEPROVISION }}
+          cert_p12: ${{ env.CERT_P12 }}
+          p12_pass: ${{ env.P12_PASS }}
+          signing_identity: ${{ env.SIGNING_IDENTITY }}
 
       - name: Prepare signed IPA
         run: |
@@ -201,7 +299,7 @@ jobs:
           codesign --verify --deep --strict "$APP" && echo "✅ Signature valid" || echo "⚠️ Signature check failed"
           rm -rf "$WORK"
 
-      # ── 8. Upload to transfer.sh ──────────────────────────────────
+      # ── 9. Upload to transfer.sh ──────────────────────────────────
       - name: Upload IPA to transfer.sh (14-day link)
         env:
           BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
@@ -267,7 +365,7 @@ jobs:
           echo "MANIFEST_URL=$MANIFEST_URL" >> $GITHUB_ENV
           echo "MANIFEST_URL: $MANIFEST_URL"
 
-      # ── 9. Save as Actions artifact (for manual download backup) ──
+      # ── 10. Save as Actions artifact (for manual download backup) ──
       - name: Upload signed IPA as artifact (90 days)
         uses: actions/upload-artifact@v4
         with:
@@ -276,7 +374,7 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      # ── 10. Print OTA link in Job Summary ─────────────────────────
+      # ── 11. Print OTA link in Job Summary ─────────────────────────
       - name: Output OTA install link
         run: |
           OTA_LINK="itms-services://?action=download-manifest&url=${MANIFEST_URL}"
