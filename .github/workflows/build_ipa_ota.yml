@@ -293,6 +293,15 @@ jobs:
           cert_p12: ${{ env.CERT_P12 }}
           p12_pass: ${{ env.P12_PASS }}
           signing_identity: ${{ env.SIGNING_IDENTITY }}
+        env:
+          MATCH_PASSWORD: ${{ env.P12_PASS }} # sometimes needed for keychain operations in fastlane
+
+      - name: Debug Missing Signing Identity
+        if: failure()
+        run: |
+          echo "⚠️ Failed to find the signing identity matching: '${{ env.SIGNING_IDENTITY }}'"
+          echo "Listing available identities in the keychain:"
+          security find-identity -v -p codesigning
 
       - name: Prepare signed IPA
         run: |
