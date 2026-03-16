@@ -29,6 +29,11 @@ permissions:
 jobs:
   patch-sign-ota:
     runs-on: macos-latest
+    
+    # 🎯 KHAI BÁO ENVIRONMENT Ở ĐÂY
+    environment: 
+      name: BuildiOS
+      
     timeout-minutes: 20
     steps:
       - name: Checkout Code
@@ -76,12 +81,11 @@ jobs:
             /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $DISPLAY_NAME" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $DISPLAY_NAME" "$PLIST"
           fi
           
-          # Đổi Bundle ID (Quan trọng để clone app)
+          # Đổi Bundle ID
           if [[ -n "$CUSTOM_BUNDLE_ID" ]]; then
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $CUSTOM_BUNDLE_ID" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $CUSTOM_BUNDLE_ID" "$PLIST"
             echo "BUNDLE_ID=$CUSTOM_BUNDLE_ID" >> $GITHUB_ENV
           else
-            # Nếu không nhập, lấy Bundle ID gốc
             ORIG_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" 2>/dev/null)
             echo "BUNDLE_ID=$ORIG_ID" >> $GITHUB_ENV
           fi
@@ -96,7 +100,7 @@ jobs:
           APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST" 2>/dev/null || echo "1.0")
           echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
           
-          # Đóng gói lại file IPA mới
+          # Đóng gói lại file IPA
           rm -f patched_unsigned.ipa
           (cd "$PLIST_WORK" && zip -qr "$GITHUB_WORKSPACE/patched_unsigned.ipa" Payload)
 
@@ -112,10 +116,8 @@ jobs:
       - name: Upload to transfer.sh (OTA Link)
         run: |
           RUN_ID="${{ github.run_id }}"
-          # Upload IPA đã sign
           IPA_URL=$(curl -fsSL --upload-file patched_unsigned.ipa "https://transfer.sh/hachimi-${RUN_ID}.ipa")
           
-          # Tạo & Upload Manifest (Đã cập nhật BUNDLE_ID)
           cat > manifest.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -125,7 +127,6 @@ jobs:
           
           OTA_LINK="itms-services://?action=download-manifest&url=${MANIFEST_URL}"
           
-          # Xuất kết quả
           echo "## 📲 Cài đặt OTA qua Safari" >> $GITHUB_STEP_SUMMARY
           echo '```text' >> $GITHUB_STEP_SUMMARY
           echo "$OTA_LINK" >> $GITHUB_STEP_SUMMARY
