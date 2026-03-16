@@ -239,13 +239,20 @@ jobs:
           # macOS 'security' tool often fails with modern PKCS#12 v3 encryption.
           # We re-export it with legacy encryption to be safe.
           echo "Converting P12 to legacy format for macOS compatibility..."
-          openssl pkcs12 -in cert.p12 -passin "pass:$P12_PASS" \
-            -export -out cert_legacy.p12 -passout "pass:$P12_PASS" \
-            -legacy 2>/dev/null || {
-              echo "Legacy conversion failed, attempting standard re-export..."
-              openssl pkcs12 -in cert.p12 -passin "pass:$P12_PASS" \
-                -export -out cert_legacy.p12 -passout "pass:$P12_PASS"
+
+          # Extract certs and keys to a temporary PEM file first (fixes OpenSSL 3+ error "unable to load private key")
+          openssl pkcs12 -in cert.p12 -passin "pass:$P12_PASS" -nodes -out temp_cert.pem 2>/dev/null || true
+
+          if [[ -s temp_cert.pem ]]; then
+            openssl pkcs12 -export -in temp_cert.pem -out cert_legacy.p12 -passout "pass:$P12_PASS" -legacy 2>/dev/null || {
+                echo "Legacy conversion failed, attempting standard re-export..."
+                openssl pkcs12 -export -in temp_cert.pem -out cert_legacy.p12 -passout "pass:$P12_PASS"
             }
+            rm -f temp_cert.pem
+          else
+            echo "Failed to extract certificates from P12"
+            exit 1
+          fi
 
           CERT_P12_FINAL=$(base64 -i cert_legacy.p12 | tr -d '\n')
           echo "CERT_P12=$CERT_P12_FINAL" >> $GITHUB_ENV
