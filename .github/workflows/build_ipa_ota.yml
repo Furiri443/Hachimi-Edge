@@ -22,10 +22,10 @@ name: Build IPA (Patch + Sign + OTA)
 on:
   workflow_dispatch:
     inputs:
-      ipa_url:
-        description: 'Temporary IPA download URL (Google Drive / WeTransfer / Dropbox)'
-        required: false
-        type: string
+      # ipa_url:
+      #   description: 'Temporary IPA download URL (Google Drive / WeTransfer / Dropbox)'
+      #   required: false
+      #   type: string
       app_display_name:
         description: 'Custom app name shown on iOS home screen'
         required: false
@@ -36,30 +36,30 @@ on:
         required: false
         default: true
         type: boolean
-      p12_url:
-        description: 'Direct download URL for .p12 certificate (optional)'
-        required: false
-        type: string
-      p12_password:
-        description: 'P12 export password (optional, overrides secret)'
-        required: false
-        type: string
-      provision_url:
-        description: 'Direct download URL for .mobileprovision (optional)'
-        required: false
-        type: string
-      signing_identity:
-        description: 'Signing Identity (e.g. "Apple Distribution: Name (ID)")'
-        required: false
-        type: string
-      team_id:
-        description: 'Apple Team ID (e.g. ABCDE12345)'
-        required: false
-        type: string
-      bundle_id:
-        description: 'Override Bundle ID (optional)'
-        required: false
-        type: string
+      # p12_url:
+      #   description: 'Direct download URL for .p12 certificate (optional)'
+      #   required: false
+      #   type: string
+      # p12_password:
+      #   description: 'P12 export password (optional, overrides secret)'
+      #   required: false
+      #   type: string
+      # provision_url:
+      #   description: 'Direct download URL for .mobileprovision (optional)'
+      #   required: false
+      #   type: string
+      # signing_identity:
+      #   description: 'Signing Identity (e.g. "Apple Distribution: Name (ID)")'
+      #   required: false
+      #   type: string
+      # team_id:
+      #   description: 'Apple Team ID (e.g. ABCDE12345)'
+      #   required: false
+      #   type: string
+      # bundle_id:
+      #   description: 'Override Bundle ID (optional)'
+      #   required: false
+      #   type: string
 
 permissions:
   contents: read
