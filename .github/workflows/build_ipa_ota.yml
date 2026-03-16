@@ -209,7 +209,7 @@ jobs:
           
           # 2. Upload IPA lên server (Bỏ gán biến, chỉ chạy lệnh upload)
           echo "Đang upload IPA lên server riêng..."
-          curl -fsSL -F "file=@$IPA_FILENAME" https://downloadip.furiri.click/upload.php
+          curl -fsSL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -F "file=@$IPA_FILENAME" https://downloadip.furiri.click/upload.php
           
           # 3. Chủ động tạo đường link IPA dựa trên cấu trúc thư mục của bạn
           IPA_URL="https://downloadip.furiri.click/uploads/$IPA_FILENAME"
@@ -226,7 +226,7 @@ jobs:
           mv manifest.plist "$MANIFEST_FILENAME"
           
           echo "Đang upload Manifest lên server riêng..."
-          curl -fsSL -F "file=@$MANIFEST_FILENAME" https://downloadip.furiri.click/upload.php
+          curl -fsSL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -F "file=@$MANIFEST_FILENAME" https://downloadip.furiri.click/upload.php
           
           # 6. Chủ động tạo đường link Manifest
           MANIFEST_URL="https://downloadip.furiri.click/uploads/$MANIFEST_FILENAME"
