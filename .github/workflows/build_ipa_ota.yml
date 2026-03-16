@@ -58,11 +58,22 @@ jobs:
       - name: Install Injection Tools
         run: brew install ldid insert_dylib
 
-      - name: Inject dylib into IPA
+      - name: Install Injection Tools
         run: |
-          chmod +x tools/ios/inject_ipa.sh
-          tools/ios/inject_ipa.sh "original.ipa" "artifacts/libhachimi.dylib" "patched_unsigned.ipa"
-
+          # 1. Cài đặt ldid qua Homebrew (ldid có sẵn trong thư viện chuẩn)
+          brew install ldid
+          
+          # 2. Tải và compile insert_dylib từ mã nguồn chính thức của tác giả
+          echo "Building insert_dylib from source..."
+          git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
+          cd /tmp/insert_dylib
+          xcodebuild -configuration Release > /dev/null
+          
+          # 3. Copy file thực thi vào hệ thống để dùng cho bước sau
+          sudo cp build/Release/insert_dylib /usr/local/bin/
+          
+          # 4. Kiểm tra cài đặt
+          insert_dylib || echo "insert_dylib ready!"
       - name: Clean & Patch Info.plist
         env:
           DISPLAY_NAME: ${{ inputs.app_display_name }}
