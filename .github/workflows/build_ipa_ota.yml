@@ -276,7 +276,21 @@ jobs:
           PROVISION_FINAL=$(base64 -i profile.mobileprovision | tr -d '\n')
           echo "MOBILEPROVISION=$PROVISION_FINAL" >> $GITHUB_ENV
 
-          # 4. Export other signing variables
+          # 4. Extract exactly matching SIGNING_IDENTITY from P12
+          echo "Attempting to auto-detect exact signing identity from P12..."
+          AUTO_IDENTITY=$(openssl pkcs12 -in cert_legacy.p12 -passin "pass:$P12_PASS" -nokeys -clcerts 2>/dev/null | openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null | sed -n 's/.*CN=\([^,]*\).*/\1/p' | xargs)
+
+          if [[ -n "$AUTO_IDENTITY" ]]; then
+            echo "Auto-detected exact signing identity: '$AUTO_IDENTITY'"
+            if [[ "$SIGNING_IDENTITY" != "$AUTO_IDENTITY" ]]; then
+              echo "Overriding provided SIGNING_IDENTITY ('$SIGNING_IDENTITY') with exact match from certificate."
+              SIGNING_IDENTITY="$AUTO_IDENTITY"
+            fi
+          else
+            echo "WARNING: Could not auto-detect signing identity from P12. Falling back to provided secret."
+          fi
+
+          # 5. Export other signing variables
           echo "P12_PASS=$P12_PASS" >> $GITHUB_ENV
           echo "SIGNING_IDENTITY=$SIGNING_IDENTITY" >> $GITHUB_ENV
           echo "TEAM_ID=$TEAM_ID" >> $GITHUB_ENV
