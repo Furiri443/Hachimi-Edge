@@ -24,7 +24,7 @@ on:
     inputs:
       ipa_url:
         description: 'Temporary IPA download URL (Google Drive / WeTransfer / Dropbox)'
-        required: true
+        required: false
         type: string
       app_display_name:
         description: 'Custom app name shown on iOS home screen'
@@ -95,7 +95,7 @@ jobs:
       # ── 3. Download IPA (URL passed as input, never logged) ───────
       - name: Download original IPA
         env:
-          IPA_URL: ${{ inputs.ipa_url }}
+          IPA_URL: ${{ inputs.ipa_url || secrets.IPA_URL }}
         run: |
           echo "Downloading IPA..."
           curl -fsSL --max-time 300 -L -o original.ipa "$IPA_URL"
