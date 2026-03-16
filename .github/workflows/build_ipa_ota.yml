@@ -177,30 +177,24 @@ jobs:
           PROVISION_B64: ${{ secrets.PROVISION_BASE64 }}
           BUNDLE_ID: ${{ env.BUNDLE_ID }}
         run: |
-          echo "$PROVISION_B64" | tr -d '\n\r ' | base64 -d > profile.mobileprovision
-          fastlane run resign \
-            ipa:"patched_unsigned.ipa" \
-            provisioning_profile:"profile.mobileprovision" \
-            bundle_id:"$BUNDLE_ID"
-
-      - name: 🚀 Re-sign IPA with Fastlane
-        env:
-          PROVISION_B64: ${{ secrets.PROVISION_BASE64 }}
-          BUNDLE_ID: ${{ env.BUNDLE_ID }}
-        run: |
-          # 1. Giải mã Provisioning Profile (có bộ lọc tr -d '\n\r ' để chống lỗi khoảng trắng từ Windows)
+          # 1. Giải mã Provisioning Profile
           echo "$PROVISION_B64" | tr -d '\n\r ' | base64 -d > profile.mobileprovision
           
-          # Kiểm tra file có bị rỗng do copy sai Secret không
-          if [ ! -s profile.mobileprovision ]; then
-            echo "❌ LỖI: Không thể giải mã Provisioning Profile. Vui lòng kiểm tra lại Secret PROVISION_BASE64."
+          # 2. Tự động lấy Signing Identity (Mã SHA1) từ Keychain của macOS
+          SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep ')' | awk '{print $2}' | head -n 1)
+          
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "❌ LỖI: Không tìm thấy chứng chỉ nào trong hệ thống!"
+            security find-identity -v -p codesigning
             exit 1
           fi
-          echo "✅ Đã giải mã Provisioning Profile thành công"
-
-          # 2. Chạy lệnh Resign của Fastlane (Tự động nhận diện chứng chỉ trong hệ thống)
+          
+          echo "✅ Đã nhận diện được Signing Identity: $SIGNING_IDENTITY"
+          
+          # 3. Chạy lệnh Fastlane với đầy đủ tham số
           fastlane run resign \
             ipa:"patched_unsigned.ipa" \
+            signing_identity:"$SIGNING_IDENTITY" \
             provisioning_profile:"profile.mobileprovision" \
             bundle_id:"$BUNDLE_ID"
 
