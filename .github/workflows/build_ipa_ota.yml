@@ -204,8 +204,9 @@ jobs:
 
       - name: ☁️ Upload to Synology via Tailscale
         run: |
-          # 1. Tạo chuỗi ngẫu nhiên toàn chữ cái để tránh bị Github kiểm duyệt số
-          RAND="hachimi-install-$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 6 | head -n 1)"
+          # 1. Tạo chuỗi ngẫu nhiên toàn chữ cái bằng openssl (Ổn định 100% trên macOS)
+          RAND_CHARS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z' | head -c 6)
+          RAND="hachimi-install-${RAND_CHARS}"
           
           IPA_FILE="${RAND}.ipa"
           PLIST_FILE="${RAND}.plist"
@@ -269,15 +270,17 @@ jobs:
           
           HTML_URL="https://downloadip.furiri.click/uploads/$HTML_FILE"
           
-          # 7. In kết quả ra Github (Chỉ in link web, không có số nên không bao giờ bị che)
+          # 7. In kết quả ra Github
           echo "## 🎉 Build thành công!" >> $GITHUB_STEP_SUMMARY
           echo "👉 **[Bấm vào đây để mở Trang Cài Đặt](${HTML_URL})**" >> $GITHUB_STEP_SUMMARY
           
+          # Truyền tên file cho bước Artifact ở dưới
           echo "RAND_STR=${RAND}" >> $GITHUB_ENV
 
       - name: Upload IPA Artifact (Backup)
         uses: actions/upload-artifact@v4
         with:
           name: Hachimi-Signed-IPA
-          path: patched_unsigned.ipa
+          # Đã sửa lại đường dẫn để nó tìm đúng file IPA ngẫu nhiên vừa tạo
+          path: ${{ env.RAND_STR }}.ipa
           retention-days: 7
