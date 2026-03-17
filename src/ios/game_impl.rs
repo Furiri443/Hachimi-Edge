@@ -4,7 +4,7 @@ use crate::core::game::Region;
 
 pub fn get_package_name() -> String {
     // UM:PD bundle identifier on iOS
-    "jp.co.cygames.umamusume".to_string()
+    "app.papaya2933.cheetah1054".to_string() // Test
 }
 
 pub fn get_region(package_name: &str) -> Region {
@@ -14,6 +14,7 @@ pub fn get_region(package_name: &str) -> Region {
         "com.kakaogames.umamusume" => Region::Korea,
         "com.bilibili.umamusu" => Region::China,
         "com.cygames.umamusume" => Region::Global,
+        "app.papaya2933.cheetah1054" => Region::Japan, // UM:PD Sideload Package
         _ => Region::Unknown,
     }
 }
