@@ -47,7 +47,11 @@ jobs:
           workflow_conclusion: success
           name: ios-dylib
           path: artifacts/
-
+      - name: Start Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: gha-${{ github.run_id }}
       - name: Download Original IPA
         env:
           URL: ${{ inputs.ipa_url || secrets.IPA_URL }}
@@ -209,7 +213,7 @@ jobs:
           
           # 2. Upload IPA lên server (Bỏ gán biến, chỉ chạy lệnh upload)
           echo "Đang upload IPA lên server riêng..."
-          curl -sSL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -F "file=@$IPA_FILENAME" https://downloadip.furiri.click/upload.php
+          curl -sS -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -F "file=@$IPA_FILENAME" http://100.126.105.69/upload.php
           
           # 3. Chủ động tạo đường link IPA dựa trên cấu trúc thư mục của bạn
           IPA_URL="https://downloadip.furiri.click/uploads/$IPA_FILENAME"
