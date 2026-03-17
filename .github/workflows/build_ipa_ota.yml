@@ -202,52 +202,78 @@ jobs:
             provisioning_profile:"profile.mobileprovision" \
             bundle_id:"$BUNDLE_ID"
 
-      - name: ☁️ Upload to Custom Server (OTA Link)
+      - name: ☁️ Upload to Synology via Tailscale
         run: |
-          RUN_ID="${{ github.run_id }}"
-          IPA_FILENAME="hachimi-${RUN_ID}.ipa"
-          MANIFEST_FILENAME="hachimi-manifest-${RUN_ID}.plist"
+          # 1. Tạo chuỗi ngẫu nhiên toàn chữ cái để tránh bị Github kiểm duyệt số
+          RAND="hachimi$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 6 | head -n 1)"
           
-          # 1. Đổi tên file IPA cho gọn
-          mv patched_unsigned.ipa "$IPA_FILENAME"
+          IPA_FILE="${RAND}.ipa"
+          PLIST_FILE="${RAND}.plist"
+          HTML_FILE="${RAND}.html"
           
-          # 2. Upload IPA lên server (Bỏ gán biến, chỉ chạy lệnh upload)
-          echo "Đang upload IPA lên server riêng..."
-          curl -sS -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -F "file=@$IPA_FILENAME" http://100.126.105.69/upload.php
+          # 2. Upload IPA
+          mv patched_unsigned.ipa "$IPA_FILE"
+          echo "Đang upload IPA lên NAS..."
+          curl -sS -A "Mozilla" -F "file=@$IPA_FILE" http://100.126.105.69/upload.php > /dev/null
           
-          # 3. Chủ động tạo đường link IPA dựa trên cấu trúc thư mục của bạn
-          IPA_URL="https://downloadip.furiri.click/uploads/$IPA_FILENAME"
-          echo "Link IPA đã lưu: $IPA_URL"
+          IPA_URL="https://downloadip.furiri.click/uploads/$IPA_FILE"
           
-          # 4. Tạo file cấu hình Manifest
-          cat > manifest.plist <<EOF
+          # 3. Tạo file cấu hình Manifest
+          cat > "$PLIST_FILE" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict><key>items</key><array><dict><key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>${IPA_URL}</string></dict></array><key>metadata</key><dict><key>bundle-identifier</key><string>${BUNDLE_ID}</string><key>bundle-version</key><string>${APP_VERSION}</string><key>kind</key><string>software</string><key>title</key><string>${{ inputs.app_display_name }}</string></dict></dict></array></dict></plist>
           EOF
           
-          # 5. Đổi tên và Upload Manifest
-          mv manifest.plist "$MANIFEST_FILENAME"
+          # 4. Upload Manifest
+          echo "Đang upload Manifest lên NAS..."
+          curl -sS -A "Mozilla" -F "file=@$PLIST_FILE" http://100.126.105.69/upload.php > /dev/null
           
-          echo "Đang upload Manifest lên server riêng..."
-          curl -sSL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -F "file=@$MANIFEST_FILENAME" https://downloadip.furiri.click/upload.php
+          PLIST_URL="https://downloadip.furiri.click/uploads/$PLIST_FILE"
+          OTA_LINK="itms-services://?action=download-manifest&url=${PLIST_URL}"
           
-          # 6. Chủ động tạo đường link Manifest
-          MANIFEST_URL="https://downloadip.furiri.click/uploads/$MANIFEST_FILENAME"
-          echo "Link Manifest đã lưu: $MANIFEST_URL"
+          # 5. TẠO TRANG WEB CÀI ĐẶT MINI (HTML)
+          ENCODED_OTA=$(jq -nr --arg v "$OTA_LINK" '$v | @uri')
+          QR_URL="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${ENCODED_OTA}"
           
-          # 7. Tạo link cài đặt OTA cho iPhone
-          OTA_LINK="itms-services://?action=download-manifest&url=${MANIFEST_URL}"
+          cat > "$HTML_FILE" <<EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Cài đặt ${{ inputs.app_display_name }}</title>
+              <style>
+                  body { font-family: -apple-system, sans-serif; text-align: center; margin-top: 50px; background-color: #f2f2f7; }
+                  .container { background: white; padding: 30px; border-radius: 20px; max-width: 400px; margin: auto; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+                  h2 { color: #1c1c1e; }
+                  .btn { display: block; padding: 15px; background: #007aff; color: white; text-decoration: none; border-radius: 12px; font-size: 18px; font-weight: bold; margin-top: 20px; }
+                  .qr-code { margin-top: 30px; border: 2px solid #e5e5ea; border-radius: 12px; padding: 10px; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h2>🚀 Cài đặt Ứng dụng</h2>
+                  <p>Bấm nút bên dưới từ trình duyệt Safari trên iPhone để cài đặt:</p>
+                  <a class="btn" href="${OTA_LINK}">📥 Cài đặt ngay</a>
+                  <p style="margin-top: 30px; color: #8e8e93;">Hoặc dùng Camera quét mã QR:</p>
+                  <img class="qr-code" src="${QR_URL}" width="200" alt="QR Code">
+              </div>
+          </body>
+          </html>
+          EOF
           
-          # 8. Hiển thị kết quả ra màn hình Github Actions
-          echo "## 📲 Cài đặt OTA qua Safari" >> $GITHUB_STEP_SUMMARY
-          echo '```text' >> $GITHUB_STEP_SUMMARY
-          echo "$OTA_LINK" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔗 Link trực tiếp (Backup):" >> $GITHUB_STEP_SUMMARY
-          echo "- **IPA:** [$IPA_URL]($IPA_URL)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Manifest:** [$MANIFEST_URL]($MANIFEST_URL)" >> $GITHUB_STEP_SUMMARY
+          # 6. Upload trang Web lên NAS
+          echo "Đang upload Trang cài đặt lên NAS..."
+          curl -sS -A "Mozilla" -F "file=@$HTML_FILE" http://100.126.105.69/upload.php > /dev/null
+          
+          HTML_URL="https://downloadip.furiri.click/uploads/$HTML_FILE"
+          
+          # 7. In kết quả ra Github (Chỉ in link web, không có số nên không bao giờ bị che)
+          echo "## 🎉 Build thành công!" >> $GITHUB_STEP_SUMMARY
+          echo "👉 **[Bấm vào đây để mở Trang Cài Đặt](${HTML_URL})**" >> $GITHUB_STEP_SUMMARY
+          
+          echo "RAND_STR=${RAND}" >> $GITHUB_ENV
 
       - name: Upload IPA Artifact (Backup)
         uses: actions/upload-artifact@v4
