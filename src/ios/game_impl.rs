@@ -21,7 +21,7 @@ pub fn get_package_name() -> String {
 
 pub fn get_region(package_name: &str) -> Region {
     match package_name {
-        "jp.co.cygames.umamusume" => Region::Japan,
+        "jp.co.cygames.umamusume" | "app.papaya2933.cheetah1054" => Region::Japan,
         "com.komoe.kmumamusumegp" | "com.komoe.umamusumeofficial" => Region::Taiwan,
         "com.kakaogames.umamusume" => Region::Korea,
         "com.bilibili.umamusu" => Region::China,
