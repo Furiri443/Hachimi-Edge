@@ -205,7 +205,7 @@ jobs:
       - name: ☁️ Upload to Synology via Tailscale
         run: |
           # 1. Tạo chuỗi ngẫu nhiên toàn chữ cái để tránh bị Github kiểm duyệt số
-          RAND="hachimi$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 6 | head -n 1)"
+          RAND="hachimi-install-$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 6 | head -n 1)"
           
           IPA_FILE="${RAND}.ipa"
           PLIST_FILE="${RAND}.plist"
