@@ -3,9 +3,20 @@ use std::path::PathBuf;
 use crate::core::game::Region;
 
 pub fn get_package_name() -> String {
-    // UM:PD bundle identifier on iOS
-    "app.papaya2933.cheetah1054".to_string() // Test
-                                             // "jp.co.cygames.umamusume".to_string() // Official
+    // Dynamically read bundle ID from NSBundle (works with resigned IPAs)
+    unsafe {
+        let cls = objc::runtime::Class::get("NSBundle").unwrap();
+        let bundle: *mut objc::runtime::Object = objc::msg_send![cls, mainBundle];
+        let bundle_id: *mut objc::runtime::Object = objc::msg_send![bundle, bundleIdentifier];
+
+        if bundle_id.is_null() {
+            return "unknown".to_string();
+        }
+
+        let utf8_str: *const std::os::raw::c_char = objc::msg_send![bundle_id, UTF8String];
+        let bytes = std::ffi::CStr::from_ptr(utf8_str).to_bytes();
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 pub fn get_region(package_name: &str) -> Region {
@@ -15,7 +26,6 @@ pub fn get_region(package_name: &str) -> Region {
         "com.kakaogames.umamusume" => Region::Korea,
         "com.bilibili.umamusu" => Region::China,
         "com.cygames.umamusume" => Region::Global,
-        "app.papaya2933.cheetah1054" => Region::Japan, // UM:PD Sideload Package
         _ => Region::Unknown,
     }
 }

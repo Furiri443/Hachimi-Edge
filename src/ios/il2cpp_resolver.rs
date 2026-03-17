@@ -31,31 +31,40 @@ use object::LittleEndian;
 ///
 /// On success returns a map of function name → absolute virtual address.
 pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static str, usize>, &'static str> {
+    info!("═══ STAGE 3: IL2CPP RESOLVER ═══");
+    info!("Parsing Mach-O header at {:#x}, slide={:#x}...", header_addr, slide);
+
     // SAFETY: dyld guarantees the header is valid as long as the image is loaded.
     let data = unsafe { image_as_slice(header_addr) };
 
     let macho = MachOFile64::<LittleEndian>::parse(data)
         .map_err(|_| "il2cpp_resolver: failed to parse Mach-O header")?;
+    info!("Mach-O header parsed OK");
 
     // ── Step 1: locate il2cpp_init via signature scan ──────────────────────
+    info!("Searching for \"IL2CPP Root Domain\" signature...");
     let il2cpp_init_rva = find_il2cpp_init_rva(&macho, data)
         .ok_or("il2cpp_resolver: il2cpp_init signature not found")?;
 
     let base = header_addr; // TEXT base == header address for dylibs
     let il2cpp_init_va = (base as i64 + il2cpp_init_rva as i64) as usize;
-    info!("iOS: il2cpp_init found at {:#x} (RVA {:#x})", il2cpp_init_va, il2cpp_init_rva);
+    info!("il2cpp_init found: VA={:#x} RVA={:#x}", il2cpp_init_va, il2cpp_init_rva);
 
     // ── Step 2: parse LC_FUNCTION_STARTS ───────────────────────────────────
+    info!("Parsing LC_FUNCTION_STARTS...");
     let mut fn_starts = collect_function_starts(&macho, data, slide, base)?;
     fn_starts.sort_unstable();
+    info!("LC_FUNCTION_STARTS: {} functions parsed", fn_starts.len());
 
     // ── Step 3: locate il2cpp_init in the sorted list ─────────────────────
     let init_idx = fn_starts
         .partition_point(|&va| va < il2cpp_init_va);
 
     if init_idx >= fn_starts.len() || fn_starts[init_idx] != il2cpp_init_va {
+        error!("il2cpp_init VA {:#x} not found in function starts table", il2cpp_init_va);
         return Err("il2cpp_resolver: il2cpp_init not found in LC_FUNCTION_STARTS");
     }
+    info!("il2cpp_init at index {} of {} functions", init_idx, fn_starts.len());
 
     // ── Step 4: map each API name to its address ───────────────────────────
     let remaining = fn_starts.len() - init_idx;
@@ -71,7 +80,7 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
         table.insert(name, va);
     }
 
-    info!("iOS: mapped {} IL2CPP API functions", table.len());
+    info!("Mapped {} IL2CPP API functions", table.len());
     Ok(table)
 }
 

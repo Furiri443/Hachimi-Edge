@@ -31,10 +31,17 @@ unsafe extern "C" fn on_image_added(mh: *const MachHeader, slide: libc::intptr_t
             .unwrap_or("");
 
         if crate::ios::hachimi_impl::is_il2cpp_lib(name) {
-            info!("iOS: UnityFramework loaded at {:p}, slide={:#x}", mh, slide);
+            // ═══ STAGE 2: DYLD IMAGE CALLBACK ═══
+            info!("═══ STAGE 2: DYLD IMAGE CALLBACK ═══");
+            info!("Image loaded: {}", name);
+            info!("Matched as IL2CPP lib, header={:#x} slide={:#x}", mh as usize, slide);
+            info!("Calling on_il2cpp_loaded...");
+
             // Trigger IL2CPP resolver before handing off to Hachimi core.
             crate::ios::hachimi_impl::on_il2cpp_loaded(mh as usize, slide as isize);
             Hachimi::instance().on_dlopen(name, mh as usize);
+
+            info!("═══ STAGE 2: DONE ═══");
         }
         break;
     }
@@ -44,10 +51,8 @@ fn init_internal() {
     unsafe {
         _dyld_register_func_for_add_image(Some(on_image_added));
     }
-    info!("iOS: dyld image callback registered");
 }
 
 pub fn init() {
     init_internal();
 }
-
