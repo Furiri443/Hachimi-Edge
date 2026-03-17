@@ -15,7 +15,7 @@ on:
       bundle_id:
         description: 'Custom Bundle ID (e.g., com.cygames.umamusume.chiyono)'
         required: false
-        default: 'com.cygames.umamusume.chiyono'
+        default: 'app.papaya2933.cheetah1054'
         type: string
       enable_files_sharing:
         description: 'Enable iTunes File Sharing'
