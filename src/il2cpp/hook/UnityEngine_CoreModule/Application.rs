@@ -20,9 +20,17 @@ impl_addr_wrapper_fn!(OpenURL, OPENURL_ADDR, (), url: *mut Il2CppString);
 pub fn init(UnityEngine_CoreModule: *const Il2CppImage) {
     get_class_or_return!(UnityEngine_CoreModule, UnityEngine, Application);
 
-    let set_targetFrameRate_addr = il2cpp_resolve_icall(
+    let mut set_targetFrameRate_addr = il2cpp_resolve_icall(
         c"UnityEngine.Application::set_targetFrameRate(System.Int32)".as_ptr()
-    );
+    ) as usize;
+
+    // On iOS il2cpp_resolve_icall is not implemented; fall back to method lookup.
+    #[cfg(target_os = "ios")]
+    if set_targetFrameRate_addr == 0 {
+        set_targetFrameRate_addr = get_method_addr(Application, c"set_targetFrameRate", 1);
+        info!("Application::set_targetFrameRate (iOS method lookup): {:#x}", set_targetFrameRate_addr);
+    }
+
     new_hook!(set_targetFrameRate_addr, set_targetFrameRate);
 
     unsafe {

@@ -25,7 +25,53 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                 map.entry(name).or_insert(addr);
             }
             info!("iOS: IL2CPP resolver populated {} symbols", map.len());
+
+            // Set the legacy HANDLE for any remaining dlsym() calls.
+            crate::il2cpp::symbols::set_handle(header_addr);
+
+            // Grab il2cpp_init address BEFORE storing the map, then hook it.
+            // We can't call on_hooking_finished() here because il2cpp_init() hasn't
+            // run yet (dyld fires this callback before the game's main() starts).
+            let il2cpp_init_addr = map.get("il2cpp_init").copied().unwrap_or(0);
+
             symbols_impl::set_resolved(map);
+
+            if il2cpp_init_addr != 0 {
+                install_il2cpp_init_hook(il2cpp_init_addr);
+            } else {
+                error!("iOS: il2cpp_init not in resolver map, hooking will not fire");
+            }
+        }
+    }
+}
+
+/// Trampoline to the original `il2cpp_init`.
+static ORIG_IL2CPP_INIT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Our hook for `il2cpp_init(domain_name)`.
+/// Called right after Unity finishes initialising the scripting runtime.
+unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char) -> i32 {
+    let orig: extern "C" fn(*const std::os::raw::c_char) -> i32 =
+        std::mem::transmute(ORIG_IL2CPP_INIT.load(std::sync::atomic::Ordering::Relaxed));
+    let result = orig(domain_name);
+
+    info!("iOS: il2cpp_init returned {}, triggering on_hooking_finished", result);
+    crate::core::Hachimi::instance().on_hooking_finished();
+
+    result
+}
+
+fn install_il2cpp_init_hook(addr: usize) {
+    use crate::core::Interceptor;
+    let hachimi = crate::core::Hachimi::instance();
+    match hachimi.interceptor.hook(addr, hooked_il2cpp_init as usize) {
+        Ok(trampoline) => {
+            ORIG_IL2CPP_INIT.store(trampoline, std::sync::atomic::Ordering::Relaxed);
+            info!("iOS: il2cpp_init hook installed at {:#x}", addr);
+        }
+        Err(e) => {
+            error!("iOS: failed to hook il2cpp_init: {}", e);
         }
     }
 }
