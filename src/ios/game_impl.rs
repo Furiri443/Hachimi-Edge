@@ -2,20 +2,40 @@ use std::path::PathBuf;
 
 use crate::core::game::Region;
 
+// Raw ObjC FFI — avoid dependency on objc/objc2 crate API differences
+extern "C" {
+    fn objc_getClass(name: *const u8) -> *mut std::ffi::c_void;
+    fn sel_registerName(name: *const u8) -> *mut std::ffi::c_void;
+    fn objc_msgSend(receiver: *mut std::ffi::c_void, sel: *mut std::ffi::c_void, ...) -> *mut std::ffi::c_void;
+}
+
 pub fn get_package_name() -> String {
-    // Dynamically read bundle ID from NSBundle (works with resigned IPAs)
     unsafe {
-        let cls = objc::runtime::Class::get("NSBundle").unwrap();
-        let bundle: *mut objc::runtime::Object = objc::msg_send![cls, mainBundle];
-        let bundle_id: *mut objc::runtime::Object = objc::msg_send![bundle, bundleIdentifier];
+        let cls = objc_getClass(b"NSBundle\0".as_ptr());
+        let sel_main = sel_registerName(b"mainBundle\0".as_ptr());
+        let bundle = objc_msgSend(cls, sel_main);
+
+        if bundle.is_null() {
+            return "unknown".to_string();
+        }
+
+        let sel_id = sel_registerName(b"bundleIdentifier\0".as_ptr());
+        let bundle_id = objc_msgSend(bundle, sel_id);
 
         if bundle_id.is_null() {
             return "unknown".to_string();
         }
 
-        let utf8_str: *const std::os::raw::c_char = objc::msg_send![bundle_id, UTF8String];
-        let bytes = std::ffi::CStr::from_ptr(utf8_str).to_bytes();
-        String::from_utf8_lossy(bytes).into_owned()
+        let sel_utf8 = sel_registerName(b"UTF8String\0".as_ptr());
+        let utf8_ptr = objc_msgSend(bundle_id, sel_utf8) as *const std::os::raw::c_char;
+
+        if utf8_ptr.is_null() {
+            return "unknown".to_string();
+        }
+
+        std::ffi::CStr::from_ptr(utf8_ptr)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -34,8 +54,7 @@ pub fn get_data_dir(_package_name: &str) -> PathBuf {
     get_game_documents_dir()
 }
 
-/// Returns the app's Documents directory, which is sandbox-accessible and user-visible.
-/// Path: <AppSandbox>/Documents/hachimi/
+/// Returns the app's Documents directory: <AppSandbox>/Documents/hachimi/
 fn get_game_documents_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/var/mobile".to_string());
     PathBuf::from(home).join("Documents").join("hachimi")

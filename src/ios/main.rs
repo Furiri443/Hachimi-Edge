@@ -36,7 +36,7 @@ fn hachimi_ios_init() {
     info!("═══ STAGE 1: CONSTRUCTOR ═══");
     info!("Hachimi::init() OK");
     info!("Bundle ID: {}", pkg);
-    info!("Region: {:?}", region);
+    info!("Region: {}", region);
     info!("Data dir: {:?}", data_dir);
 
     hook::init();

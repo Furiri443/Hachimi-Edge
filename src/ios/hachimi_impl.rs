@@ -112,7 +112,7 @@ unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char
             let pkg = super::game_impl::get_package_name();
             let region = super::game_impl::get_region(&pkg);
             super::show_alert("Hachimi Edge",
-                &format!("Injection OK!\nFPS → 240\nPkg: {}\nRegion: {:?}", pkg, region));
+                &format!("Injection OK!\nFPS → 240\nPkg: {}\nRegion: {}", pkg, region));
             info!("═══ STAGE 6: DONE ═══");
         } else {
             error!("set_targetFrameRate resolved to 0 — icall not found");
@@ -125,7 +125,6 @@ unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char
 }
 
 fn install_il2cpp_init_hook(addr: usize) {
-    use crate::core::Interceptor;
     let hachimi = crate::core::Hachimi::instance();
     info!("Installing il2cpp_init hook: target={:#x} hook={:#x}",
         addr, hooked_il2cpp_init as usize);
