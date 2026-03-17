@@ -1,10 +1,33 @@
 use serde::{Deserialize, Serialize};
 use crate::core::Hachimi;
+use super::{il2cpp_resolver, il2cpp_missing, symbols_impl};
 
 /// Returns true if the given filename is the IL2CPP library.
-/// On iOS Unity games, it's bundled as GameAssembly (no .so extension).
+/// On iOS Unity games, it's bundled as UnityFramework or GameAssembly.
 pub fn is_il2cpp_lib(filename: &str) -> bool {
-    filename.contains("GameAssembly") || filename.ends_with("libil2cpp.dylib")
+    filename.contains("UnityFramework")
+        || filename.contains("GameAssembly")
+        || filename.ends_with("libil2cpp.dylib")
+}
+
+/// Called by `hook::on_image_added` when `UnityFramework` is detected.
+///
+/// `header_addr` is the `mach_header_64 *` (TEXT base, slide already applied).
+/// `slide` is the ASLR slide reported by dyld.
+pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
+    match il2cpp_resolver::resolve(header_addr, slide) {
+        Err(e) => {
+            error!("iOS: IL2CPP resolver failed: {}", e);
+        }
+        Ok(mut map) => {
+            // Patch in re-implemented shims for functions absent from the binary.
+            for &(name, addr) in il2cpp_missing::missing_fn_table() {
+                map.entry(name).or_insert(addr);
+            }
+            info!("iOS: IL2CPP resolver populated {} symbols", map.len());
+            symbols_impl::set_resolved(map);
+        }
+    }
 }
 
 /// Returns true if the given filename is the CRI Ware middleware library.

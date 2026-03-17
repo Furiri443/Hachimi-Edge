@@ -7,3 +7,5 @@ pub mod hachimi_impl;
 pub mod gui_impl;
 pub mod symbols_impl;
 pub mod interceptor_impl;
+pub mod il2cpp_resolver;
+pub mod il2cpp_missing;
