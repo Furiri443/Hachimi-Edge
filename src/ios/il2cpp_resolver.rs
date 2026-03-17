@@ -15,8 +15,8 @@
 
 use fnv::FnvHashMap;
 use object::endian::LittleEndian as LE;
-use object::macho::{LinkeditDataCommand, MachHeader64};
-use object::read::macho::{FunctionStarts, LoadCommandVariant, MachOFile64};
+use object::macho::MachHeader64;
+use object::read::macho::MachOFile64;
 use object::LittleEndian;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ fn collect_function_starts(
 ) -> Result<Vec<usize>, &'static str> {
     // Find the LC_FUNCTION_STARTS load command
     let endian = macho.endian();
-    let header = macho.raw_header();
+    let header = macho.macho_header();
     let mut offset = std::mem::size_of::<MachHeader64<LE>>();
     let ncmds = header.ncmds.get(endian) as usize;
 
@@ -209,7 +209,7 @@ fn text_segment_rva(macho: &MachOFile64<LittleEndian>) -> u64 {
     use object::Object;
     for seg in macho.segments() {
         use object::ObjectSegment;
-        if seg.name().map(|n| n == "__TEXT").unwrap_or(false) {
+        if seg.name().ok().flatten() == Some("__TEXT") {
             return seg.address();
         }
     }

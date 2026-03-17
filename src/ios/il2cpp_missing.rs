@@ -298,17 +298,17 @@ pub unsafe extern "C" fn hachimi_ios_il2cpp_resolve_icall(
     _name: *const c_char,
 ) -> Il2CppMethodPointer {
     warn!("iOS: il2cpp_resolve_icall not implemented — returning null");
-    std::ptr::null_mut()
+    0
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Shim table — populated into the resolver map for missing functions
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Returns a list of `(name, fn_ptr_as_usize)` for every re-implemented function.
-/// This is called by `symbols_impl::init_ios()` to patch the resolver map.
-pub fn missing_fn_table() -> &'static [(&'static str, usize)] {
-    &[
+/// Returns a table of `(name, fn_ptr_as_usize)` for every re-implemented function.
+/// Called by `hachimi_impl::on_il2cpp_loaded` to patch the resolver map.
+pub fn missing_fn_table() -> Vec<(&'static str, usize)> {
+    vec![
         ("il2cpp_class_is_inited",
             hachimi_ios_il2cpp_class_is_inited as usize),
         ("il2cpp_class_get_method_from_name",

@@ -21,7 +21,7 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
         }
         Ok(mut map) => {
             // Patch in re-implemented shims for functions absent from the binary.
-            for &(name, addr) in il2cpp_missing::missing_fn_table() {
+            for (name, addr) in il2cpp_missing::missing_fn_table() {
                 map.entry(name).or_insert(addr);
             }
             info!("iOS: IL2CPP resolver populated {} symbols", map.len());
