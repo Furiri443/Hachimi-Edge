@@ -45,7 +45,7 @@ pub(crate) unsafe fn show_alert(title: &str, message: &str) {
 
     let sel_show = sel_registerName(b"showAlert:\0".as_ptr());
     let sel_perform = sel_registerName(b"performSelectorOnMainThread:withObject:waitUntilDone:\0".as_ptr());
-    objc_msgSend(helper, sel_perform, sel_show, ns_payload, false as i8);
+    objc_msgSend(helper, sel_perform, sel_show, ns_payload, 0 as std::os::raw::c_int);
 }
 
 extern "C" fn show_alert_impl(_this: *mut c_void, _cmd: *mut c_void, arg: *mut c_void) {
@@ -78,7 +78,7 @@ extern "C" fn show_alert_impl(_this: *mut c_void, _cmd: *mut c_void, arg: *mut c
             let root_vc = msg_send_0(window, b"rootViewController\0");
             if !root_vc.is_null() {
                 let sel_present = sel_registerName(b"presentViewController:animated:completion:\0".as_ptr());
-                objc_msgSend(root_vc, sel_present, alert, true as i8, std::ptr::null_mut::<c_void>());
+                objc_msgSend(root_vc, sel_present, alert, 1 as std::os::raw::c_int, std::ptr::null_mut::<c_void>());
             }
         }
     }
@@ -96,7 +96,7 @@ pub(crate) unsafe fn unlock_fps_on_main_thread(target_fps: i32) {
     let helper = msg_send_0(helper_cls, b"new\0");
     let sel_unlock = sel_registerName(b"unlockFps\0".as_ptr());
     let sel_perform = sel_registerName(b"performSelectorOnMainThread:withObject:waitUntilDone:\0".as_ptr());
-    objc_msgSend(helper, sel_perform, sel_unlock, std::ptr::null_mut::<c_void>(), false as i8);
+    objc_msgSend(helper, sel_perform, sel_unlock, std::ptr::null_mut::<c_void>(), 0 as std::os::raw::c_int);
 }
 
 static TARGET_FPS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(240);
