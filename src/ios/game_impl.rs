@@ -5,6 +5,7 @@ use crate::core::game::Region;
 pub fn get_package_name() -> String {
     // UM:PD bundle identifier on iOS
     "app.papaya2933.cheetah1054".to_string() // Test
+                                             // "jp.co.cygames.umamusume".to_string() // Official
 }
 
 pub fn get_region(package_name: &str) -> Region {
