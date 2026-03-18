@@ -154,41 +154,73 @@ fn collect_function_starts(
     slide: isize,
     _base: usize,
 ) -> Result<Vec<usize>, &'static str> {
-    // Find the LC_FUNCTION_STARTS load command
     let endian = macho.endian();
     let header = macho.macho_header();
     let mut offset = std::mem::size_of::<MachHeader64<LE>>();
     let ncmds = header.ncmds.get(endian) as usize;
 
-    // We'll walk load commands manually to get to LC_FUNCTION_STARTS
-    // (object crate exposes function_starts() but requires owned FunctionStarts)
-    let mut fn_starts_off: Option<u32> = None;
+    let mut fn_starts_off:  Option<u32> = None;
     let mut fn_starts_size: Option<u32> = None;
+    // __LINKEDIT mapping: needed to convert file offsets → memory offsets
+    let mut linkedit_vmaddr:  Option<u64> = None;
+    let mut linkedit_fileoff: Option<u64> = None;
 
     for _ in 0..ncmds {
         if offset + 8 > data.len() { break; }
-        let cmd = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap());
+        let cmd     = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap());
         let cmdsize = u32::from_le_bytes(data[offset+4..offset+8].try_into().unwrap()) as usize;
+        if cmdsize == 0 { break; }
 
+        const LC_SEGMENT_64:      u32 = 0x19;
         const LC_FUNCTION_STARTS: u32 = 0x26;
-        if cmd == LC_FUNCTION_STARTS && cmdsize >= 16 {
-            fn_starts_off  = Some(u32::from_le_bytes(data[offset+8..offset+12].try_into().unwrap()));
-            fn_starts_size = Some(u32::from_le_bytes(data[offset+12..offset+16].try_into().unwrap()));
-            break;
+
+        match cmd {
+            LC_FUNCTION_STARTS if cmdsize >= 16 => {
+                fn_starts_off  = Some(u32::from_le_bytes(data[offset+8..offset+12].try_into().unwrap()));
+                fn_starts_size = Some(u32::from_le_bytes(data[offset+12..offset+16].try_into().unwrap()));
+            }
+            LC_SEGMENT_64 if cmdsize >= 64 => {
+                // segname is at offset+8, 16 bytes null-padded
+                let segname = &data[offset+8..offset+24];
+                if segname.starts_with(b"__LINKEDIT") {
+                    // vmaddr at offset+24 (u64), fileoff at offset+40 (u64)
+                    linkedit_vmaddr  = Some(u64::from_le_bytes(data[offset+24..offset+32].try_into().unwrap()));
+                    linkedit_fileoff = Some(u64::from_le_bytes(data[offset+40..offset+48].try_into().unwrap()));
+                }
+            }
+            _ => {}
         }
+
         offset += cmdsize;
     }
 
-    let off  = fn_starts_off.ok_or("il2cpp_resolver: LC_FUNCTION_STARTS not found")?;
-    let size = fn_starts_size.ok_or("il2cpp_resolver: LC_FUNCTION_STARTS size missing")?;
+    let dataoff  = fn_starts_off.ok_or("il2cpp_resolver: LC_FUNCTION_STARTS not found")? as u64;
+    let datasize = fn_starts_size.ok_or("il2cpp_resolver: LC_FUNCTION_STARTS size missing")? as u64;
+
+    // Convert file offset → memory (vmaddr-relative) offset.
+    // In the loaded image: mem_offset = dataoff - linkedit_fileoff + linkedit_vmaddr
+    // If we can't find LINKEDIT, fall back to direct file offset (often works if fileoff == vmaddr).
+    let mem_off: u64 = if let (Some(lv), Some(lf)) = (linkedit_vmaddr, linkedit_fileoff) {
+        info!("__LINKEDIT vmaddr={:#x} fileoff={:#x}", lv, lf);
+        dataoff - lf + lv
+    } else {
+        warn!("__LINKEDIT segment not found, using raw file offset (may be wrong)");
+        dataoff
+    };
 
     let linked_data = data
-        .get(off as usize .. (off + size) as usize)
+        .get(mem_off as usize .. (mem_off + datasize) as usize)
         .ok_or("il2cpp_resolver: LC_FUNCTION_STARTS data out of range")?;
 
-    // Decode ULEB128 delta-encoded RVAs
+    // Log first few bytes for debugging
+    let preview: Vec<String> = linked_data.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+    info!("LC_FUNCTION_STARTS mem_off={:#x} size={} first_bytes=[{}]",
+        mem_off, datasize, preview.join(" "));
+
+    // Decode ULEB128 delta-encoded function-start RVAs.
+    // Each entry is a delta from the previous entry; first is delta from start of __TEXT.
     let text_start_rva = text_segment_rva(macho);
-    let mut addresses: Vec<usize> = Vec::with_capacity(512);
+    let mut addresses: Vec<usize> = Vec::with_capacity(4096);
     let mut cur = text_start_rva;
     let mut i = 0usize;
 
@@ -199,6 +231,7 @@ fn collect_function_starts(
         // Apply ASLR slide to get virtual address
         let va = (cur as i64 + slide as i64) as usize;
         addresses.push(va);
+
         i += consumed;
     }
 
