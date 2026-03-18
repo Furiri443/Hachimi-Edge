@@ -135,78 +135,10 @@ fn install_il2cpp_init_hook(addr: usize) {
             info!("═══ STAGE 4: DONE — waiting for il2cpp_init() call ═══");
         }
         Err(e) => {
-            warn!("Inline hook failed: {} — using polling fallback", e);
-            info!("═══ STAGE 4: FALLBACK — polling il2cpp_domain_get() ═══");
-            start_il2cpp_init_poller();
+            error!("Failed to hook il2cpp_init: {}", e);
+            error!("═══ STAGE 4: FAILED ═══");
         }
     }
-}
-
-/// Fallback for non-jailbroken: poll `il2cpp_domain_get()` until it returns
-/// non-null, meaning Unity has already called `il2cpp_init()`.
-fn start_il2cpp_init_poller() {
-    std::thread::spawn(|| {
-        info!("Poller started — waiting for il2cpp_domain_get() != 0...");
-
-        // Get il2cpp_domain_get address from the resolved symbol table.
-        let domain_get_addr = crate::ios::symbols_impl::lookup_resolved("il2cpp_domain_get")
-            .unwrap_or(0);
-
-        if domain_get_addr == 0 {
-            error!("il2cpp_domain_get not in resolved map — polling impossible");
-            error!("═══ STAGE 4: FAILED ═══");
-            return;
-        }
-
-        let domain_get: extern "C" fn() -> *mut std::ffi::c_void =
-            unsafe { std::mem::transmute(domain_get_addr) };
-
-        // Poll every 100ms, up to 60 seconds
-        for i in 0..600 {
-            let domain = domain_get();
-            if !domain.is_null() {
-                info!("il2cpp_domain_get() returned {:#x} after {}ms",
-                    domain as usize, i * 100);
-
-                // ═══ STAGE 5: IL2CPP_INIT FIRED (via poller) ═══
-                info!("═══ STAGE 5: IL2CPP_INIT FIRED (polling fallback) ═══");
-                info!("Triggering on_hooking_finished...");
-                crate::core::Hachimi::instance().on_hooking_finished();
-                info!("═══ STAGE 5: DONE ═══");
-
-                // ═══ STAGE 6: FPS UNLOCK TEST ═══
-                info!("═══ STAGE 6: FPS UNLOCK TEST ═══");
-                info!("Waiting 3s for Unity to stabilize...");
-                std::thread::sleep(std::time::Duration::from_secs(3));
-
-                info!("Resolving set_targetFrameRate...");
-                unsafe {
-                    let func_addr = crate::il2cpp::api::il2cpp_resolve_icall(
-                        c"UnityEngine.Application::set_targetFrameRate(System.Int32)".as_ptr(),
-                    );
-                    if func_addr != 0 {
-                        info!("set_targetFrameRate resolved at {:#x}", func_addr);
-                        super::unlock_fps_on_main_thread(240);
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        let pkg = super::game_impl::get_package_name();
-                        let region = super::game_impl::get_region(&pkg);
-                        super::show_alert("Hachimi Edge",
-                            &format!("Injection OK!\nFPS → 240\nPkg: {}\nRegion: {}", pkg, region));
-                        info!("═══ STAGE 6: DONE ═══");
-                    } else {
-                        error!("set_targetFrameRate resolved to 0");
-                        unsafe { super::show_alert("Hachimi Error", "set_targetFrameRate = 0"); }
-                        error!("═══ STAGE 6: FAILED ═══");
-                    }
-                }
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        error!("Timed out after 60s — il2cpp_domain_get() never returned non-null");
-        error!("═══ STAGE 4: FAILED (timeout) ═══");
-    });
 }
 
 /// Returns true if the given filename is the CRI Ware middleware library.

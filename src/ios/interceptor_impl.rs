@@ -19,10 +19,8 @@ type MsHookFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut *mut c_void)
 enum HookBackend {
     /// Substrate / Ellekit via `MSHookFunction`.
     Substrate { hook_fn: MsHookFn },
-    /// No hook backend available (non-jailbroken).
-    /// Dobby is NOT used because it corrupts __TEXT pages and triggers
-    /// CODESIGNING: Invalid Page kills on non-jailbroken iOS.
-    None,
+    /// Dobby via `dobby_rs` (static link).
+    Dobby,
 }
 
 static BACKEND: OnceCell<HookBackend> = OnceCell::new();
@@ -30,6 +28,10 @@ static BACKEND: OnceCell<HookBackend> = OnceCell::new();
 fn backend() -> &'static HookBackend {
     BACKEND.get_or_init(|| {
         // Try to find MSHookFunction in the already-loaded address space.
+        // Ellekit (rootless, /var/jb/usr/lib/libellekit.dylib) and
+        // Cydia Substrate (rootful, /usr/lib/libsubstrate.dylib) both export
+        // this symbol.  We probe RTLD_DEFAULT first, then try opening the
+        // known paths explicitly.
         const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut::<c_void>().wrapping_sub(2)
             as *mut c_void; // -2 on Darwin
         const HOOK_SYM: &[u8] = b"MSHookFunction\0";
@@ -63,9 +65,9 @@ fn backend() -> &'static HookBackend {
                 libc::dlclose(handle);
             }
 
-            // 3. No hook backend — Dobby is NOT safe on iOS (corrupts code pages)
-            warn!("iOS: no hook backend (MSHookFunction not found, Dobby skipped to avoid CODESIGNING kill)");
-            HookBackend::None
+            // 3. Fall back to Dobby (bundled, JIT-entitlement required)
+            info!("iOS: falling back to Dobby for hooking");
+            HookBackend::Dobby
         }
     })
 }
@@ -88,10 +90,8 @@ pub unsafe fn hook(orig_addr: usize, hook_addr: usize) -> Result<usize, Error> {
                 Ok(trampoline as usize)
             }
         }
-        HookBackend::None => {
-            Err(Error::HookingError(
-                "No hook backend available (non-jailbroken, Dobby skipped)".into()
-            ))
+        HookBackend::Dobby => {
+            Ok(dobby_rs::hook(orig_addr as *mut c_void, hook_addr as *mut c_void)? as usize)
         }
     }
 }
@@ -101,24 +101,29 @@ pub unsafe fn unhook(hook: &HookHandle) -> Result<(), Error> {
     match backend() {
         HookBackend::Substrate { .. } => {
             // Substrate / Ellekit don't provide an unhook API.
+            // Re-hook to the trampoline (i.e. restore original) if needed.
+            // For Hachimi this is fine — hooks are permanent.
             Ok(())
         }
-        HookBackend::None => Ok(()),
+        HookBackend::Dobby => {
+            dobby_rs::unhook(hook.orig_addr as *mut c_void)?;
+            Ok(())
+        }
+    }
+}
+
+impl From<dobby_rs::DobbyHookError> for Error {
+    fn from(e: dobby_rs::DobbyHookError) -> Self {
+        Error::HookingError(e.to_string())
     }
 }
 
 /// Resolve a symbol by name from a loaded dylib/framework.
+/// Falls back to `dlopen(NULL) + dlsym` — works for system symbols.
 pub unsafe fn find_symbol_by_name(module: &str, symbol: &str) -> Result<usize, Error> {
-    // Use dlopen + dlsym directly (works for exported symbols)
-    let mod_cs = std::ffi::CString::new(module).map_err(|_| Error::SymbolNotFound(module.to_owned(), symbol.to_owned()))?;
-    let sym_cs = std::ffi::CString::new(symbol).map_err(|_| Error::SymbolNotFound(module.to_owned(), symbol.to_owned()))?;
-    let handle = libc::dlopen(mod_cs.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
-    if !handle.is_null() {
-        let addr = libc::dlsym(handle, sym_cs.as_ptr());
-        libc::dlclose(handle);
-        if !addr.is_null() {
-            return Ok(addr as usize);
-        }
+    // Try Dobby's resolver first (wraps dlopen+dlsym)
+    if let Some(addr) = dobby_rs::resolve_symbol(module, symbol) {
+        return Ok(addr as usize);
     }
     Err(Error::SymbolNotFound(module.to_owned(), symbol.to_owned()))
 }
