@@ -36,3 +36,8 @@ pub unsafe fn dlsym(_handle: *mut std::os::raw::c_void, name: &str) -> usize {
             0
         })
 }
+
+/// Look up a resolved symbol by name (safe version for poller fallback).
+pub fn lookup_resolved(name: &str) -> Option<usize> {
+    RESOLVED.get().and_then(|m| m.get(name).copied())
+}
