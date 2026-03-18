@@ -230,7 +230,8 @@ fn text_segment_rva(macho: &MachOFile64<LittleEndian>) -> u64 {
 /// We limit to 64 MiB which is larger than any known `UnityFramework` binary.
 /// SAFETY: caller must ensure `header_addr` is a valid loaded Mach-O header.
 unsafe fn image_as_slice(header_addr: usize) -> &'static [u8] {
-    const MAX_IMAGE_SIZE: usize = 64 * 1024 * 1024;
+    // UnityFramework is ~133 MiB on iOS 2.24.x; use 512 MiB to be safe.
+    const MAX_IMAGE_SIZE: usize = 512 * 1024 * 1024;
     std::slice::from_raw_parts(header_addr as *const u8, MAX_IMAGE_SIZE)
 }
 
