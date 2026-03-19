@@ -1,4 +1,4 @@
-name: Build .deb (Jailbreak)
+name: Build .deb (Jailbreak → Sileo Repo)
 
 on:
   workflow_dispatch:
@@ -39,7 +39,7 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           hostname: gha-deb-${{ github.run_id }}
 
-      - name: 📦 Read version from Cargo.toml
+      - name: 📌 Read version from Cargo.toml
         run: |
           VERSION=$(awk '/^\[package\]/{flag=1} flag && /^version/{print $3; exit}' Cargo.toml | tr -d '"')
           echo "VERSION=$VERSION" >> $GITHUB_ENV
@@ -62,100 +62,85 @@ jobs:
             echo ""
           done
 
-      - name: ☁️ Upload to Synology via Tailscale
+      - name: 📋 Generate APT Repo Metadata
         run: |
-          # 1. Tạo chuỗi ngẫu nhiên
-          RAND_CHARS=$(cat /dev/urandom | tr -dc 'a-zA-Z' | head -c 6)
-          RAND="hachimi-deb-${RAND_CHARS}"
+          # 1. Tạo cấu trúc repo
+          mkdir -p repo/debs
+          cp hachimi_${VERSION}_*.deb repo/debs/
 
-          ROOTFUL_DEB="hachimi_${VERSION}_rootful.deb"
-          ROOTLESS_DEB="hachimi_${VERSION}_rootless.deb"
-          HTML_FILE="${RAND}.html"
+          # 2. Generate Packages index
+          cd repo
+          dpkg-scanpackages -m debs > Packages
 
-          # 2. Upload cả 2 file .deb
-          echo "📤 Đang upload Rootful .deb..."
-          curl -sS -A "Mozilla" -F "file=@$ROOTFUL_DEB" http://100.126.105.69/upload.php > /dev/null
+          echo "═══ Packages Index ═══"
+          cat Packages
 
-          echo "📤 Đang upload Rootless .deb..."
-          curl -sS -A "Mozilla" -F "file=@$ROOTLESS_DEB" http://100.126.105.69/upload.php > /dev/null
+          # 3. Compress
+          bzip2 -k Packages
+          gzip -k Packages
 
-          ROOTFUL_URL="https://downloadip.furiri.click/uploads/$ROOTFUL_DEB"
-          ROOTLESS_URL="https://downloadip.furiri.click/uploads/$ROOTLESS_DEB"
-
-          # 3. Tạo trang cài đặt HTML
-          cat > "$HTML_FILE" <<EOF
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Hachimi .deb - Jailbreak Install</title>
-              <style>
-                  body { font-family: -apple-system, sans-serif; text-align: center; margin-top: 40px; background-color: #f2f2f7; }
-                  .container { background: white; padding: 30px; border-radius: 20px; max-width: 450px; margin: auto; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-                  h2 { color: #1c1c1e; }
-                  .version { color: #8e8e93; font-size: 14px; margin-top: -10px; }
-                  .section { margin-top: 25px; text-align: left; }
-                  .section h3 { color: #1c1c1e; font-size: 16px; margin-bottom: 8px; }
-                  .section p { color: #8e8e93; font-size: 13px; margin-bottom: 10px; }
-                  .btn { display: block; padding: 14px; color: white; text-decoration: none; border-radius: 12px; font-size: 16px; font-weight: bold; margin-top: 10px; text-align: center; }
-                  .btn-rootful { background: #34c759; }
-                  .btn-rootless { background: #007aff; }
-                  .cmd { background: #f2f2f7; padding: 10px 14px; border-radius: 8px; font-family: 'SF Mono', monospace; font-size: 12px; color: #1c1c1e; word-break: break-all; margin-top: 10px; text-align: left; }
-                  .footer { margin-top: 25px; color: #c7c7cc; font-size: 11px; }
-              </style>
-          </head>
-          <body>
-              <div class="container">
-                  <h2>📦 Hachimi Jailbreak</h2>
-                  <p class="version">v${VERSION}</p>
-
-                  <div class="section">
-                      <h3>🟢 Rootful (unc0ver, checkra1n...)</h3>
-                      <p>Dành cho jailbreak rootful truyền thống</p>
-                      <a class="btn btn-rootful" href="${ROOTFUL_URL}">⬇️ Tải Rootful .deb</a>
-                      <div class="cmd">dpkg -i ${ROOTFUL_DEB}</div>
-                  </div>
-
-                  <div class="section">
-                      <h3>🔵 Rootless (Dopamine, palera1n...)</h3>
-                      <p>Dành cho jailbreak rootless mới</p>
-                      <a class="btn btn-rootless" href="${ROOTLESS_URL}">⬇️ Tải Rootless .deb</a>
-                      <div class="cmd">dpkg -i ${ROOTLESS_DEB}</div>
-                  </div>
-
-                  <p class="footer">Sau khi cài, mở Cydia/Sileo để respring hoặc chạy: killall -9 SpringBoard</p>
-              </div>
-          </body>
-          </html>
+          # 4. Generate Release
+          cat > Release <<EOF
+          Origin: Furiri
+          Label: Hachimi
+          Suite: stable
+          Version: ${VERSION}
+          Codename: ios
+          Architectures: iphoneos-arm iphoneos-arm64
+          Components: main
+          Description: Hachimi - Game enhancement and translation mod
+          MD5Sum:
+           $(md5sum Packages | awk '{print $1}') $(wc -c < Packages) Packages
+           $(md5sum Packages.bz2 | awk '{print $1}') $(wc -c < Packages.bz2) Packages.bz2
+           $(md5sum Packages.gz | awk '{print $1}') $(wc -c < Packages.gz) Packages.gz
           EOF
 
-          # 4. Upload trang HTML
-          echo "📤 Đang upload trang cài đặt..."
-          curl -sS -A "Mozilla" -F "file=@$HTML_FILE" http://100.126.105.69/upload.php > /dev/null
+          echo ""
+          echo "═══ Release ═══"
+          cat Release
+          cd ..
 
-          HTML_URL="https://downloadip.furiri.click/uploads/$HTML_FILE"
+      - name: ☁️ Upload Repo to Synology via Tailscale
+        run: |
+          UPLOAD_URL="http://100.126.105.69/upload.php"
+          REPO_BASE="https://downloadip.furiri.click/uploads/repo"
 
-          # 5. In kết quả ra Github
-          echo "## 📦 Build .deb thành công!" >> $GITHUB_STEP_SUMMARY
+          # 1. Upload .deb files vào repo/debs/
+          echo "📤 Uploading .deb packages..."
+          for deb in repo/debs/*.deb; do
+            echo "  → $(basename $deb)"
+            curl -sS -A "Mozilla" -F "file=@$deb" -F "path=repo/debs" "$UPLOAD_URL" > /dev/null
+          done
+
+          # 2. Upload repo metadata vào repo/
+          echo "📤 Uploading repo metadata..."
+          for meta in repo/Packages repo/Packages.bz2 repo/Packages.gz repo/Release; do
+            echo "  → $(basename $meta)"
+            curl -sS -A "Mozilla" -F "file=@$meta" -F "path=repo" "$UPLOAD_URL" > /dev/null
+          done
+
+          # 3. In kết quả ra Github Summary
+          echo "## 📦 Build .deb + Repo Update thành công!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Sileo Repository" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$REPO_BASE" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "👉 Thêm URL trên vào **Sileo → Sources → Add** để cài đặt và nhận update tự động." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 Download trực tiếp" >> $GITHUB_STEP_SUMMARY
           echo "| Loại | Link |" >> $GITHUB_STEP_SUMMARY
           echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟢 Rootful | [\`$ROOTFUL_DEB\`]($ROOTFUL_URL) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔵 Rootless | [\`$ROOTLESS_DEB\`]($ROOTLESS_URL) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🌐 Trang cài đặt | [Bấm vào đây]($HTML_URL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟢 Rootful | [\`hachimi_${VERSION}_rootful.deb\`]($REPO_BASE/debs/hachimi_${VERSION}_rootful.deb) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔵 Rootless | [\`hachimi_${VERSION}_rootless.deb\`]($REPO_BASE/debs/hachimi_${VERSION}_rootless.deb) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Cài đặt qua SSH:**" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "### 💻 Cài qua SSH" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo "# Rootful:" >> $GITHUB_STEP_SUMMARY
-          echo "curl -LO $ROOTFUL_URL && dpkg -i $ROOTFUL_DEB" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "curl -LO $REPO_BASE/debs/hachimi_${VERSION}_rootful.deb && dpkg -i hachimi_${VERSION}_rootful.deb" >> $GITHUB_STEP_SUMMARY
           echo "# Rootless:" >> $GITHUB_STEP_SUMMARY
-          echo "curl -LO $ROOTLESS_URL && dpkg -i $ROOTLESS_DEB" >> $GITHUB_STEP_SUMMARY
+          echo "curl -LO $REPO_BASE/debs/hachimi_${VERSION}_rootless.deb && dpkg -i hachimi_${VERSION}_rootless.deb" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-
-          # Truyền cho bước Artifact
-          echo "RAND_STR=${RAND}" >> $GITHUB_ENV
 
       - name: Upload .deb Artifacts (Backup)
         uses: actions/upload-artifact@v4
