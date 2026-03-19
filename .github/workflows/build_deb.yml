@@ -6,7 +6,7 @@ on:
       bundle_filter:
         description: 'Bundle ID(s) to inject into (comma-separated)'
         required: false
-        default: 'jp.co.cygames.umamusume'
+        default: 'jp.co.cygames.umamusume,app.papaya2933.cheetah1054,com.komoe.kmumamusumegp,com.komoe.umamusumeofficial,com.kakaogames.umamusume,com.bilibili.umamusu,com.cygames.umamusume'
         type: string
 
 permissions:

@@ -32,7 +32,7 @@ echo "[deb] Version: $VERSION"
 echo "[deb] Dylib:   $DYLIB"
 
 # ── Filter plist (configurable via BUNDLE_FILTER env) ─────────────
-BUNDLE_FILTER="${BUNDLE_FILTER:-jp.co.cygames.umamusume}"
+BUNDLE_FILTER="${BUNDLE_FILTER:-jp.co.cygames.umamusume,app.papaya2933.cheetah1054,com.komoe.kmumamusumegp,com.komoe.umamusumeofficial,com.kakaogames.umamusume,com.bilibili.umamusu,com.cygames.umamusume}"
 FILTER_PLIST=$(mktemp)
 
 # Build filter plist with multiple bundle support
