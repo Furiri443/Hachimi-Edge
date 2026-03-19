@@ -72,7 +72,7 @@ build_deb() {
 
     # 5. Build .deb
     local DEB_FILE="$OUTPUT_DIR/hachimi_${VERSION}_${VARIANT}.deb"
-    dpkg-deb --build "$STAGE" "$DEB_FILE"
+    dpkg-deb -Zxz --build "$STAGE" "$DEB_FILE"
 
     echo "[deb] Built: $DEB_FILE ($(du -sh "$DEB_FILE" | cut -f1))"
 
