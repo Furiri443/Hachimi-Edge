@@ -4,5 +4,4 @@ Version: ${VERSION}
 Architecture: iphoneos-arm64
 Description: Game enhancement and translation mod
 Maintainer: Furiri
-Depends: ellekit
 Section: Tweaks
