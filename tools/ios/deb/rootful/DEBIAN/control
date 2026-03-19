@@ -3,5 +3,7 @@ Name: Hachimi
 Version: ${VERSION}
 Architecture: iphoneos-arm
 Description: Game enhancement and translation mod
+Author: Furiri
 Maintainer: Furiri
+Installed-Size: 4096
 Section: Tweaks
