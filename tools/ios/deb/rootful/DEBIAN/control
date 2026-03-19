@@ -1,0 +1,8 @@
+Package: com.furiri.hachimi
+Name: Hachimi
+Version: ${VERSION}
+Architecture: iphoneos-arm
+Description: Game enhancement and translation mod
+Maintainer: Furiri
+Depends: mobilesubstrate
+Section: Tweaks
