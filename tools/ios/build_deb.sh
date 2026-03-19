@@ -62,13 +62,13 @@ build_deb() {
 
     # 3. Copy dylib + filter plist
     cp "$DYLIB" "$TWEAK_DIR/libhachimi.dylib"
-    cp "$FILTER_PLIST" "$TWEAK_DIR/hachimi.plist"
+    cp "$FILTER_PLIST" "$TWEAK_DIR/libhachimi.plist"
 
     # 4. Fix permissions (dpkg-deb requires specific perms)
     find "$STAGE" -type d -exec chmod 755 {} \;
     chmod 644 "$STAGE/DEBIAN/control"
     chmod 755 "$TWEAK_DIR/libhachimi.dylib"
-    chmod 644 "$TWEAK_DIR/hachimi.plist"
+    chmod 644 "$TWEAK_DIR/libhachimi.plist"
 
     # 5. Build .deb
     local DEB_FILE="$OUTPUT_DIR/hachimi_${VERSION}_${VARIANT}.deb"
