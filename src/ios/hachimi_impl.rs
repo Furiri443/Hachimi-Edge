@@ -142,10 +142,26 @@ fn install_il2cpp_init_hook(addr: usize) {
     let hachimi = crate::core::Hachimi::instance();
     info!("Installing il2cpp_init hook: target={:#x} hook={:#x}",
         addr, hooked_il2cpp_init as usize);
+
+    // Dump first 4 instructions BEFORE hook (for comparison)
+    unsafe {
+        let pre_bytes = std::slice::from_raw_parts(addr as *const u32, 4);
+        info!("PRE-HOOK  bytes @ {:#x}: {:08x} {:08x} {:08x} {:08x}",
+            addr, pre_bytes[0], pre_bytes[1], pre_bytes[2], pre_bytes[3]);
+    }
+
     match hachimi.interceptor.hook(addr, hooked_il2cpp_init as usize) {
         Ok(trampoline) => {
             ORIG_IL2CPP_INIT.store(trampoline, std::sync::atomic::Ordering::Relaxed);
             info!("Trampoline at {:#x}", trampoline);
+
+            // Dump first 4 instructions AFTER hook — should be a branch now
+            unsafe {
+                let post_bytes = std::slice::from_raw_parts(addr as *const u32, 4);
+                info!("POST-HOOK bytes @ {:#x}: {:08x} {:08x} {:08x} {:08x}",
+                    addr, post_bytes[0], post_bytes[1], post_bytes[2], post_bytes[3]);
+            }
+
             info!("═══ STAGE 4: DONE — waiting for il2cpp_init() call ═══");
         }
         Err(e) => {
