@@ -63,14 +63,20 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                 error!("═══ STAGE 4: FAILED ═══");
             }
 
-            // ═══ STAGE 4.5: DETECT ALREADY-INITIALIZED ═══
-            // On iOS, il2cpp_init may have been called before our dyld callback.
-            // Spawn a thread to poll il2cpp_domain_get — if it returns non-null,
-            // the runtime is already up and we run post-init logic directly.
+            // ═══ STAGE 4.5: WAIT FOR IL2CPP INIT ═══
+            // On iOS, il2cpp_init runs before our dyld callback, so hooking
+            // it is pointless. Instead, poll il2cpp_domain_get to detect
+            // when init has completed, then run post-init logic.
+            // 
+            // We keep the hook installed as a fallback (e.g. future games
+            // where timing differs), but the poll thread handles the common case.
+            info!("═══ STAGE 4.5: Starting domain poll thread ═══");
             std::thread::spawn(|| {
-                for attempt in 1..=10 {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+                // Initial delay: give Unity time to call il2cpp_init
+                info!("Poll thread: waiting 5s for IL2CPP to initialize...");
+                std::thread::sleep(std::time::Duration::from_secs(5));
 
+                for attempt in 1..=20 {
                     // If Stage 5 already completed via hook, we're done
                     if STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
                         info!("Stage 5 already completed via hook — poll thread exiting");
@@ -82,7 +88,8 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                         super::symbols_impl::dlsym(std::ptr::null_mut(), "il2cpp_domain_get")
                     };
                     if domain_get_addr == 0 {
-                        info!("Polling... il2cpp_domain_get not resolved yet ({}/10)", attempt);
+                        info!("Polling... il2cpp_domain_get not resolved yet ({}/20)", attempt);
+                        std::thread::sleep(std::time::Duration::from_secs(1));
                         continue;
                     }
 
@@ -90,16 +97,21 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                         unsafe { std::mem::transmute(domain_get_addr) };
                     let domain = unsafe { domain_get() };
 
-                    if !domain.is_null() && !STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-                        info!("═══ STAGE 4.5: il2cpp_init already ran (domain={:?})! Running post-init... ═══", domain);
-                        STAGE5_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
-                        unsafe { run_post_il2cpp_init(); }
+                    if !domain.is_null() {
+                        info!("Domain found: {:?} — waiting 3s for full IL2CPP settle...", domain);
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+
+                        if !STAGE5_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            info!("═══ STAGE 4.5: il2cpp_init already ran! Running post-init... ═══");
+                            unsafe { run_post_il2cpp_init(); }
+                        }
                         return;
                     }
 
-                    info!("Polling for il2cpp domain... attempt {}/10", attempt);
+                    info!("Polling for il2cpp domain... attempt {}/20 (domain=null)", attempt);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
                 }
-                error!("═══ STAGE 4.5: Timed out waiting for il2cpp domain ═══");
+                error!("═══ STAGE 4.5: Timed out waiting for il2cpp domain after 25s ═══");
             });
         }
     }
