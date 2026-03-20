@@ -90,7 +90,7 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
 
 /// Search for `"IL2CPP Root Domain\0"` in `__TEXT,__cstring`, then trace the
 /// ADRP+ADD address-formation sequence to the `BL` that calls `il2cpp_init`.
-fn find_il2cpp_init_rva(macho: &MachOFile64<LittleEndian>, data: &[u8]) -> Option<u64> {
+fn find_il2cpp_init_rva(macho: &MachOFile64<LittleEndian>, _data: &[u8]) -> Option<u64> {
     use object::{Object, ObjectSection};
 
     let cstring_sec = macho.section_by_name("__cstring").or_else(|| {

@@ -78,7 +78,7 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                         if !domain.is_null() && !STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
                             info!("═══ STAGE 4.5: il2cpp_init already ran (domain={:?})! Running post-init... ═══", domain);
                             STAGE5_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
-                            run_post_il2cpp_init();
+                            unsafe { run_post_il2cpp_init(); }
                             return;
                         }
                     }
