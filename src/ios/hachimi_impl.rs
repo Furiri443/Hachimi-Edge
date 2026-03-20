@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::core::Hachimi;
-use super::{il2cpp_resolver, il2cpp_missing, resolve_icall_scanner, symbols_impl};
+use super::{il2cpp_resolver, il2cpp_missing, symbols_impl};
 
 /// Returns true if the given filename is the IL2CPP library.
 /// On iOS Unity games, it's bundled as UnityFramework or GameAssembly.
@@ -21,7 +21,6 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
         Err(e) => {
             error!("═══ STAGE 3: FAILED ═══");
             error!("IL2CPP resolver error: {}", e);
-            // Still try fallback — show error alert
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 unsafe {
@@ -41,9 +40,6 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
             // Set the legacy HANDLE for any remaining dlsym() calls.
             crate::il2cpp::symbols::set_handle(header_addr);
 
-            // Grab il2cpp_init address BEFORE storing the map, then hook it.
-            let il2cpp_init_addr = map.get("il2cpp_init").copied().unwrap_or(0);
-
             // Log first few resolved symbols for verification
             let mut sample: Vec<_> = map.iter().take(5).collect();
             sample.sort_by_key(|(k, _)| *k);
@@ -51,6 +47,14 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                 info!("  {} = {:#x}", name, addr);
             }
 
+            // Log resolve_icall specifically
+            if let Some(&addr) = map.get("il2cpp_resolve_icall") {
+                info!("  il2cpp_resolve_icall = {:#x} ✅", addr);
+            } else {
+                warn!("  il2cpp_resolve_icall NOT in map ⚠️");
+            }
+
+            let il2cpp_init_addr = map.get("il2cpp_init").copied().unwrap_or(0);
             symbols_impl::set_resolved(map);
 
             // ═══ STAGE 4: IL2CPP_INIT HOOK ═══
@@ -62,57 +66,6 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                 error!("il2cpp_init NOT in resolver map — hooking will not fire");
                 error!("═══ STAGE 4: FAILED ═══");
             }
-
-            // ═══ STAGE 4.5: WAIT FOR IL2CPP INIT ═══
-            // On iOS, il2cpp_init runs before our dyld callback, so hooking
-            // it is pointless. Instead, poll il2cpp_domain_get to detect
-            // when init has completed, then run post-init logic.
-            // 
-            // We keep the hook installed as a fallback (e.g. future games
-            // where timing differs), but the poll thread handles the common case.
-            info!("═══ STAGE 4.5: Starting domain poll thread ═══");
-            std::thread::spawn(|| {
-                // Initial delay: give Unity time to call il2cpp_init
-                info!("Poll thread: waiting 5s for IL2CPP to initialize...");
-                std::thread::sleep(std::time::Duration::from_secs(5));
-
-                for attempt in 1..=20 {
-                    // If Stage 5 already completed via hook, we're done
-                    if STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-                        info!("Stage 5 already completed via hook — poll thread exiting");
-                        return;
-                    }
-
-                    // Use raw dlsym to avoid lazy_fnptr crash (transmute 0 → fn ptr)
-                    let domain_get_addr = unsafe {
-                        super::symbols_impl::dlsym(std::ptr::null_mut(), "il2cpp_domain_get")
-                    };
-                    if domain_get_addr == 0 {
-                        info!("Polling... il2cpp_domain_get not resolved yet ({}/20)", attempt);
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        continue;
-                    }
-
-                    let domain_get: unsafe extern "C" fn() -> *mut std::os::raw::c_void =
-                        unsafe { std::mem::transmute(domain_get_addr) };
-                    let domain = unsafe { domain_get() };
-
-                    if !domain.is_null() {
-                        info!("Domain found: {:?} — waiting 3s for full IL2CPP settle...", domain);
-                        std::thread::sleep(std::time::Duration::from_secs(3));
-
-                        if !STAGE5_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            info!("═══ STAGE 4.5: il2cpp_init already ran! Running post-init... ═══");
-                            unsafe { run_post_il2cpp_init(); }
-                        }
-                        return;
-                    }
-
-                    info!("Polling for il2cpp domain... attempt {}/20 (domain=null)", attempt);
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-                error!("═══ STAGE 4.5: Timed out waiting for il2cpp domain after 25s ═══");
-            });
         }
     }
 }
@@ -121,14 +74,10 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
 static ORIG_IL2CPP_INIT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Whether Stage 5 logic has been executed (by hook or by poll thread).
-static STAGE5_DONE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Our hook for `il2cpp_init(domain_name)`.
-/// Called right after Unity finishes initialising the scripting runtime.
+/// Called when Unity initialises the IL2CPP scripting runtime.
 unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char) -> i32 {
-    info!("═══ STAGE 5: IL2CPP_INIT FIRED (via hook) ═══");
+    info!("═══ STAGE 5: IL2CPP_INIT FIRED ═══");
 
     let name_str = if !domain_name.is_null() {
         std::ffi::CStr::from_ptr(domain_name).to_string_lossy().to_string()
@@ -137,49 +86,31 @@ unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char
     };
     info!("il2cpp_init called with domain: {}", name_str);
 
-    let orig: extern "C" fn(*const std::os::raw::c_char) -> i32 =
-        std::mem::transmute(ORIG_IL2CPP_INIT.load(std::sync::atomic::Ordering::Relaxed));
-    let result = orig(domain_name);
+    // Call the original il2cpp_init via trampoline
+    let trampoline = ORIG_IL2CPP_INIT.load(std::sync::atomic::Ordering::Relaxed);
+    if trampoline == 0 {
+        error!("FATAL: trampoline is null! Cannot call original il2cpp_init");
+        return -1;
+    }
 
+    let orig: extern "C" fn(*const std::os::raw::c_char) -> i32 =
+        std::mem::transmute(trampoline);
+    let result = orig(domain_name);
     info!("Original il2cpp_init returned: {}", result);
 
-    // Mark done and run post-init
-    if !STAGE5_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        run_post_il2cpp_init();
-    } else {
-        info!("Stage 5 already completed by poll thread — skipping");
-    }
-
-    result
-}
-
-/// Shared post-init logic for Stages 5, 5.5, 6.
-/// Called either from the hook (if it fires) or from the polling thread (if
-/// il2cpp_init already ran before our hook was installed).
-unsafe fn run_post_il2cpp_init() {
-    info!("═══ STAGE 5: POST-INIT ═══");
+    // Initialize the IL2CPP symbols (sets DOMAIN)
+    info!("Calling symbols::init()...");
     crate::il2cpp::symbols::init();
+
+    // Notify core that hooking is done
+    info!("Calling on_hooking_finished()...");
     crate::core::Hachimi::instance().on_hooking_finished();
     info!("═══ STAGE 5: DONE ═══");
-
-    // ═══ STAGE 5.5: FIND il2cpp_resolve_icall VIA BL-SCAN ═══
-    info!("═══ STAGE 5.5: RESOLVE_ICALL SCANNER ═══");
-    match resolve_icall_scanner::resolve() {
-        Some(addr) => {
-            super::symbols_impl::update_resolved("il2cpp_resolve_icall", addr);
-            info!("il2cpp_resolve_icall patched ✅ {:#x}", addr);
-            info!("═══ STAGE 5.5: DONE ═══");
-        }
-        None => {
-            error!("il2cpp_resolve_icall NOT FOUND — icall APIs will return null");
-            error!("═══ STAGE 5.5: FAILED ═══");
-        }
-    }
 
     // ═══ STAGE 6: FPS UNLOCK TEST ═══
     std::thread::spawn(|| {
         info!("═══ STAGE 6: FPS UNLOCK TEST ═══");
-        info!("Waiting 5s for Unity to initialize...");
+        info!("Waiting 5s for Unity to settle...");
         std::thread::sleep(std::time::Duration::from_secs(5));
 
         info!("Resolving set_targetFrameRate...");
@@ -204,6 +135,8 @@ unsafe fn run_post_il2cpp_init() {
             error!("═══ STAGE 6: FAILED ═══");
         }
     });
+
+    result
 }
 
 fn install_il2cpp_init_hook(addr: usize) {
@@ -211,7 +144,7 @@ fn install_il2cpp_init_hook(addr: usize) {
     info!("Installing il2cpp_init hook: target={:#x} hook={:#x}",
         addr, hooked_il2cpp_init as usize);
 
-    // Dump first 4 instructions BEFORE hook (for comparison)
+    // Dump first 4 instructions BEFORE hook
     unsafe {
         let pre_bytes = std::slice::from_raw_parts(addr as *const u32, 4);
         info!("PRE-HOOK  bytes @ {:#x}: {:08x} {:08x} {:08x} {:08x}",
@@ -220,10 +153,11 @@ fn install_il2cpp_init_hook(addr: usize) {
 
     match hachimi.interceptor.hook(addr, hooked_il2cpp_init as usize) {
         Ok(trampoline) => {
-            ORIG_IL2CPP_INIT.store(trampoline, std::sync::atomic::Ordering::Relaxed);
+            // Store trampoline IMMEDIATELY — before any other thread can call il2cpp_init
+            ORIG_IL2CPP_INIT.store(trampoline, std::sync::atomic::Ordering::Release);
             info!("Trampoline at {:#x}", trampoline);
 
-            // Dump first 4 instructions AFTER hook — should be a branch now
+            // Dump instructions AFTER hook
             unsafe {
                 let post_bytes = std::slice::from_raw_parts(addr as *const u32, 4);
                 info!("POST-HOOK bytes @ {:#x}: {:08x} {:08x} {:08x} {:08x}",
