@@ -50,20 +50,6 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
     let il2cpp_init_va = (base as i64 + il2cpp_init_rva as i64) as usize;
     info!("il2cpp_init found: VA={:#x} RVA={:#x}", il2cpp_init_va, il2cpp_init_rva);
 
-    // ── Step 1.5: locate il2cpp_resolve_icall via signature scan ──────────
-    info!("Searching for il2cpp_resolve_icall via Behaviour::get_enabled signature...");
-    let resolve_icall_va = match find_resolve_icall_rva(&macho) {
-        Some(rva) => {
-            let va = (base as i64 + rva as i64) as usize;
-            info!("il2cpp_resolve_icall found: VA={:#x} RVA={:#x}", va, rva);
-            Some(va)
-        }
-        None => {
-            warn!("il2cpp_resolve_icall signature not found — icall APIs will be unavailable");
-            None
-        }
-    };
-
     // ── Step 2: parse LC_FUNCTION_STARTS ───────────────────────────────────
     info!("Parsing LC_FUNCTION_STARTS...");
     let mut fn_starts = collect_function_starts(&macho, data, slide, base)?;
@@ -87,17 +73,11 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
     }
 
     let mut table: FnvHashMap<&'static str, usize> =
-        FnvHashMap::with_capacity_and_hasher(IL2CPP_API_ORDER.len() + 1, Default::default());
+        FnvHashMap::with_capacity_and_hasher(IL2CPP_API_ORDER.len(), Default::default());
 
     for (offset, &name) in IL2CPP_API_ORDER.iter().enumerate() {
         let va = fn_starts[init_idx + offset];
         table.insert(name, va);
-    }
-
-    // Insert il2cpp_resolve_icall if found via signature scan
-    if let Some(va) = resolve_icall_va {
-        table.insert("il2cpp_resolve_icall", va);
-        info!("il2cpp_resolve_icall added to map at {:#x}", va);
     }
 
     info!("Mapped {} IL2CPP API functions", table.len());
@@ -156,74 +136,6 @@ fn find_il2cpp_init_rva(macho: &MachOFile64<LittleEndian>, _data: &[u8]) -> Opti
             if is_bl(bl_w) {
                 let bl_va = text_base_rva + (j as u64) * 4;
                 let target_rva = bl_target_rva(bl_w, bl_va);
-                return Some(target_rva);
-            }
-        }
-    }
-
-    None
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Signature scan: find il2cpp_resolve_icall RVA
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Search for `"UnityEngine.Behaviour::get_enabled()\0"` in `__TEXT,__cstring`,
-/// then trace the ADRP+ADD → BL chain to locate `il2cpp_resolve_icall`.
-///
-/// `Behaviour::get_enabled` is a simple icall wrapper that calls
-/// `il2cpp_resolve_icall("UnityEngine.Behaviour::get_enabled()")` early on.
-/// The first BL after the string-loading ADRP+ADD is that call.
-fn find_resolve_icall_rva(macho: &MachOFile64<LittleEndian>) -> Option<u64> {
-    use object::{Object, ObjectSection};
-
-    let cstring_sec = macho.section_by_name("__cstring")?;
-    let cstring_data = cstring_sec.data().ok()?;
-    let cstring_base_rva = cstring_sec.address();
-
-    // Find the icall name string
-    let needle = b"UnityEngine.Behaviour::get_enabled()\0";
-    let offset_in_sec = cstring_data
-        .windows(needle.len())
-        .position(|w| w == needle)?;
-    let string_rva = cstring_base_rva + offset_in_sec as u64;
-    let string_va_page = string_rva & !0xFFF;
-
-    info!("resolve_icall: found icall string at RVA {:#x} (page {:#x})",
-        string_rva, string_va_page);
-
-    let text_sec = macho.section_by_name("__text")?;
-    let text_data = text_sec.data().ok()?;
-    let text_base_rva = text_sec.address();
-    let words: &[u32] = bytemuck_cast_u32(text_data);
-
-    // Look for ADRP+ADD that loads the string address, then the next BL
-    for (i, &w) in words.iter().enumerate() {
-        if !is_adrp(w) { continue; }
-        let adrp_va = text_base_rva + (i as u64) * 4;
-        let computed_page = adrp_target_page(w, adrp_va);
-        if computed_page != string_va_page { continue; }
-
-        // Verify next instruction is ADD with matching page offset
-        let Some(&add_w) = words.get(i + 1) else { continue };
-        if !is_add_imm12(add_w) { continue; }
-
-        // Extract the 12-bit immediate from ADD to verify it points to our string
-        let add_imm = ((add_w >> 10) & 0xFFF) as u64;
-        let full_addr = computed_page + add_imm;
-        if full_addr != string_rva { continue; }
-
-        info!("resolve_icall: matched ADRP+ADD at RVA {:#x}, scanning for BL...",
-            adrp_va);
-
-        // Walk forward to find the first BL instruction (call to resolve_icall)
-        for j in (i + 2)..(i + 10).min(words.len()) {
-            let Some(&bl_w) = words.get(j) else { break };
-            if is_bl(bl_w) {
-                let bl_va = text_base_rva + (j as u64) * 4;
-                let target_rva = bl_target_rva(bl_w, bl_va);
-                info!("resolve_icall: BL at RVA {:#x} → target RVA {:#x}",
-                    bl_va, target_rva);
                 return Some(target_rva);
             }
         }
