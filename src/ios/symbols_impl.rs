@@ -9,10 +9,15 @@
 
 use fnv::FnvHashMap;
 use once_cell::sync::OnceCell;
+use std::sync::Mutex;
 
 // ── Resolved address table ────────────────────────────────────────────────────
 
 static RESOLVED: OnceCell<FnvHashMap<&'static str, usize>> = OnceCell::new();
+
+/// Late-patch table for symbols discovered after `set_resolved` (e.g. via scanner).
+/// Key is a `&'static str`; value injected into every `dlsym` call via `PATCHES`.
+static PATCHES: Mutex<Vec<(&'static str, usize)>> = Mutex::new(Vec::new());
 
 /// Store the resolved function address table.
 /// Called once from `hachimi_impl::on_il2cpp_loaded`.
@@ -22,12 +27,32 @@ pub fn set_resolved(map: FnvHashMap<&'static str, usize>) {
     }
 }
 
+/// Inject/overwrite a single symbol discovered after initial resolution
+/// (e.g. `il2cpp_resolve_icall` found by the BL scanner).
+pub fn update_resolved(name: &'static str, addr: usize) {
+    if let Ok(mut p) = PATCHES.lock() {
+        // Replace existing entry if present
+        if let Some(e) = p.iter_mut().find(|(k, _)| *k == name) {
+            e.1 = addr;
+        } else {
+            p.push((name, addr));
+        }
+    }
+    info!("iOS: symbols_impl::update_resolved {} = {:#x}", name, addr);
+}
+
 /// Look up a function by its IL2CPP API name.
 /// Returns `0` if the table hasn't been populated or the name is unknown.
 ///
 /// # Safety
 /// The returned address is only valid while `UnityFramework` remains loaded.
 pub unsafe fn dlsym(_handle: *mut std::os::raw::c_void, name: &str) -> usize {
+    // Check late-patch table first (higher priority — scanner may override stub)
+    if let Ok(patches) = PATCHES.lock() {
+        if let Some(&(_, addr)) = patches.iter().find(|(k, _)| *k == name) {
+            if addr != 0 { return addr; }
+        }
+    }
     RESOLVED
         .get()
         .and_then(|m| m.get(name).copied())
@@ -36,3 +61,4 @@ pub unsafe fn dlsym(_handle: *mut std::os::raw::c_void, name: &str) -> usize {
             0
         })
 }
+

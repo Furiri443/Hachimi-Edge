@@ -325,7 +325,8 @@ pub fn missing_fn_table() -> Vec<(&'static str, usize)> {
             hachimi_ios_il2cpp_runtime_class_init as usize),
         ("il2cpp_thread_get_all_attached_threads",
             hachimi_ios_il2cpp_thread_get_all_attached_threads as usize),
-        ("il2cpp_resolve_icall",
-            hachimi_ios_il2cpp_resolve_icall as usize),
+        // NOTE: il2cpp_resolve_icall is NOT listed here.
+        // It is discovered at runtime by resolve_icall_scanner (Stage 5.5)
+        // via ARM64 BL-scan of Behaviour::get_enabled.
     ]
 }

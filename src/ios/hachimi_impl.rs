@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::core::Hachimi;
-use super::{il2cpp_resolver, il2cpp_missing, symbols_impl};
+use super::{il2cpp_resolver, il2cpp_missing, resolve_icall_scanner, symbols_impl};
 
 /// Returns true if the given filename is the IL2CPP library.
 /// On iOS Unity games, it's bundled as UnityFramework or GameAssembly.
@@ -91,6 +91,20 @@ unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char
     info!("Triggering on_hooking_finished...");
     crate::core::Hachimi::instance().on_hooking_finished();
     info!("═══ STAGE 5: DONE ═══");
+
+    // ═══ STAGE 5.5: FIND il2cpp_resolve_icall VIA BL-SCAN ═══
+    info!("═══ STAGE 5.5: RESOLVE_ICALL SCANNER ═══");
+    match resolve_icall_scanner::resolve() {
+        Some(addr) => {
+            super::symbols_impl::update_resolved("il2cpp_resolve_icall", addr);
+            info!("il2cpp_resolve_icall patched ✅ {:#x}", addr);
+            info!("═══ STAGE 5.5: DONE ═══");
+        }
+        None => {
+            error!("il2cpp_resolve_icall NOT FOUND — icall APIs will return null");
+            error!("═══ STAGE 5.5: FAILED ═══");
+        }
+    }
 
     // ═══ STAGE 6: FPS UNLOCK TEST ═══
     std::thread::spawn(|| {
