@@ -71,22 +71,32 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                 for attempt in 1..=10 {
                     std::thread::sleep(std::time::Duration::from_secs(1));
 
-                    // Check if our hook already fired (Stage 5 completed)
-                    if ORIG_IL2CPP_INIT.load(std::sync::atomic::Ordering::Relaxed) != 0 {
-                        // Try to see if domain is available
-                        let domain = crate::il2cpp::api::il2cpp_domain_get();
-                        if !domain.is_null() && !STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-                            info!("═══ STAGE 4.5: il2cpp_init already ran (domain={:?})! Running post-init... ═══", domain);
-                            STAGE5_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
-                            unsafe { run_post_il2cpp_init(); }
-                            return;
-                        }
-                    }
                     // If Stage 5 already completed via hook, we're done
                     if STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
                         info!("Stage 5 already completed via hook — poll thread exiting");
                         return;
                     }
+
+                    // Use raw dlsym to avoid lazy_fnptr crash (transmute 0 → fn ptr)
+                    let domain_get_addr = unsafe {
+                        super::symbols_impl::dlsym(std::ptr::null_mut(), "il2cpp_domain_get")
+                    };
+                    if domain_get_addr == 0 {
+                        info!("Polling... il2cpp_domain_get not resolved yet ({}/10)", attempt);
+                        continue;
+                    }
+
+                    let domain_get: unsafe extern "C" fn() -> *mut std::os::raw::c_void =
+                        unsafe { std::mem::transmute(domain_get_addr) };
+                    let domain = unsafe { domain_get() };
+
+                    if !domain.is_null() && !STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
+                        info!("═══ STAGE 4.5: il2cpp_init already ran (domain={:?})! Running post-init... ═══", domain);
+                        STAGE5_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+                        unsafe { run_post_il2cpp_init(); }
+                        return;
+                    }
+
                     info!("Polling for il2cpp domain... attempt {}/10", attempt);
                 }
                 error!("═══ STAGE 4.5: Timed out waiting for il2cpp domain ═══");
