@@ -176,15 +176,25 @@ fn find_resolve_icall_rva(macho: &MachOFile64<LittleEndian>) -> Option<u64> {
     let cstring_base = cstring_sec.address();
 
     let needle = b"UnityEngine.Behaviour::get_enabled()\0";
-    let offset_in_sec = cstring_data
-        .windows(needle.len())
-        .position(|w| w == needle)?;
-    let string_addr = cstring_base + offset_in_sec as u64;
-    let string_page = string_addr & !0xFFF;
-    let string_page_off = string_addr & 0xFFF;
+    
+    // Find ALL instances of the string in __cstring
+    let mut string_matches = Vec::new();
+    let mut search_idx = 0;
+    while let Some(pos) = cstring_data[search_idx..].windows(needle.len()).position(|w| w == needle) {
+        let offset = search_idx + pos;
+        let addr = cstring_base + offset as u64;
+        string_matches.push((addr & !0xFFF, addr & 0xFFF));
+        search_idx = offset + needle.len();
+    }
 
-    info!("resolve_icall: string at vmaddr {:#x} (page {:#x} + {:#x})",
-        string_addr, string_page, string_page_off);
+    info!("resolve_icall: found {} instances of the string", string_matches.len());
+    for (page, off) in &string_matches {
+        info!("  string at page {:#x} + {:#x}", page, off);
+    }
+
+    if string_matches.is_empty() {
+        return None;
+    }
 
     let text_sec = macho.section_by_name("__text")?;
     let text_data = text_sec.data().ok()?;
@@ -197,40 +207,39 @@ fn find_resolve_icall_rva(macho: &MachOFile64<LittleEndian>) -> Option<u64> {
         if !is_adrp(w) { continue; }
         let pc = text_base + (i as u64) * 4;
         let page = adrp_target_page(w, pc);
-        if page != string_page { continue; }
+        
+        // Does this ADRP point to any of our string instances?
+        let matching_instance = string_matches.iter().find(|(sp, _)| *sp == page);
+        let Some(&(_, string_page_off)) = matching_instance else { continue };
 
         page_hits += 1;
 
-        // Diagnostic: log first 3 page hits for debugging
-        if page_hits <= 3 {
-            let Some(&next_insn) = words.get(i + 1) else { continue };
-            let is_add = is_add_imm12(next_insn);
-            let add_imm = if is_add { ((next_insn >> 10) & 0xFFF) as u64 } else { 0 };
-            let rd = w & 0x1F;
-            let rn = if is_add { (next_insn >> 5) & 0x1F } else { 0 };
-            info!("resolve_icall: page hit #{} at {:#x}: next={:#010x} is_add={} imm={:#x} rd={} rn={} expect_off={:#x}",
-                page_hits, pc, next_insn, is_add, add_imm, rd, rn, string_page_off);
+        // Look ahead up to 10 instructions for the matching ADD
+        let adrp_rd = w & 0x1F;
+        let mut found_add = false;
+        let mut add_j = i + 1;
+
+        for j in (i + 1)..(i + 10).min(words.len()) {
+            let next_w = words[j];
+            if is_add_imm12(next_w) {
+                let add_rn = (next_w >> 5) & 0x1F;
+                let add_imm = ((next_w >> 10) & 0xFFF) as u64;
+                if add_rn == adrp_rd && add_imm == string_page_off {
+                    found_add = true;
+                    add_j = j;
+                    break;
+                }
+            }
         }
 
-        // Next instruction must be ADD #imm12
-        let Some(&add_w) = words.get(i + 1) else { continue };
-        if !is_add_imm12(add_w) { continue; }
-
-        // Verify ADRP Rd == ADD Rn (same register)
-        let adrp_rd = w & 0x1F;
-        let add_rn = (add_w >> 5) & 0x1F;
-        if adrp_rd != add_rn { continue; }
-
-        // Verify ADD imm12 matches the page offset of our string
-        let add_imm = ((add_w >> 10) & 0xFFF) as u64;
-        if add_imm != string_page_off { continue; }
+        if !found_add { continue; }
 
         info!("resolve_icall: ADRP+ADD match at vmaddr {:#x} (Rd=x{})",
             pc, adrp_rd);
 
-        // Find the next BL instruction
-        for j in (i + 2)..(i + 16).min(words.len()) {
-            let Some(&next_w) = words.get(j) else { break };
+        // Find the next BL instruction after the ADD
+        for j in (add_j + 1)..(add_j + 16).min(words.len()) {
+            let next_w = words[j];
             if is_bl(next_w) {
                 let bl_pc = text_base + (j as u64) * 4;
                 let target = bl_target_rva(next_w, bl_pc);

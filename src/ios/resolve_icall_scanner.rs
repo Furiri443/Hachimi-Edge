@@ -55,21 +55,30 @@ pub unsafe fn resolve() -> Option<usize> {
     // We know it's somewhere near the function (within ±4GiB for ADRP).
     // Scan each ADRP+ADD pair to reconstruct the address they compute,
     // then check if that address points to our needle string.
-    for i in 0..MAX_INSNS.saturating_sub(1) {
         let insn0 = code[i];
-        let insn1 = code[i + 1];
-
-        // Check: insn0 = ADRP, insn1 = ADD #imm12
-        if !is_adrp(insn0) || !is_add_imm12(insn1) {
-            continue;
-        }
-
-        // Verify ADRP and ADD use the same register (Rd of ADRP == Rn of ADD)
+        if !is_adrp(insn0) { continue; }
+        
         let adrp_rd = insn0 & 0x1F;
-        let add_rn = (insn1 >> 5) & 0x1F;
-        if adrp_rd != add_rn {
-            continue;
+
+        // Look ahead up to 10 instructions for an ADD using the same register
+        let mut add_j = i + 1;
+        let mut insn1 = 0;
+        let mut found_add = false;
+
+        for j in (i + 1)..(i + 10).min(MAX_INSNS) {
+            let next_insn = code[j];
+            if is_add_imm12(next_insn) {
+                let add_rn = (next_insn >> 5) & 0x1F;
+                if add_rn == adrp_rd {
+                    insn1 = next_insn;
+                    add_j = j;
+                    found_add = true;
+                    break;
+                }
+            }
         }
+
+        if !found_add { continue; }
 
         // Compute the full address: ADRP page + ADD offset
         let pc = fn_ptr + i * 4;
@@ -78,6 +87,8 @@ pub unsafe fn resolve() -> Option<usize> {
         let target_addr = page + offset;
 
         // Check if the target address contains our icall string
+        // Note: target_addr needs to be valid memory, catching faults here would be safer
+        // but since we derive it from actual in-binary ADRP+ADD it usually is.
         let candidate = std::slice::from_raw_parts(
             target_addr as *const u8,
             ICALL_STRING.len(),
@@ -90,7 +101,7 @@ pub unsafe fn resolve() -> Option<usize> {
             i * 4, target_addr);
 
         // Now find the next BL instruction after this ADD
-        for j in (i + 2)..MAX_INSNS {
+        for j in (add_j + 1)..MAX_INSNS {
             if let Some(bl_target) = decode_bl(fn_ptr + j * 4, code[j]) {
                 info!("scanner: BL at offset +{:#x} → il2cpp_resolve_icall = {:#x}",
                     j * 4, bl_target);
