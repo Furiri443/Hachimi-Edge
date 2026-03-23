@@ -50,6 +50,10 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
     let il2cpp_init_va = (base as i64 + il2cpp_init_rva as i64) as usize;
     info!("il2cpp_init found: VA={:#x} RVA={:#x}", il2cpp_init_va, il2cpp_init_rva);
 
+    // ── Step 1.5: locate il2cpp_resolve_icall via signature scan ──────────
+    info!("Searching for il2cpp_resolve_icall via Behaviour::get_enabled...");
+    let resolve_icall_rva = find_resolve_icall_rva(&macho);
+
     // ── Step 2: parse LC_FUNCTION_STARTS ───────────────────────────────────
     info!("Parsing LC_FUNCTION_STARTS...");
     let mut fn_starts = collect_function_starts(&macho, data, slide, base)?;
@@ -73,11 +77,20 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
     }
 
     let mut table: FnvHashMap<&'static str, usize> =
-        FnvHashMap::with_capacity_and_hasher(IL2CPP_API_ORDER.len(), Default::default());
+        FnvHashMap::with_capacity_and_hasher(IL2CPP_API_ORDER.len() + 1, Default::default());
 
     for (offset, &name) in IL2CPP_API_ORDER.iter().enumerate() {
         let va = fn_starts[init_idx + offset];
         table.insert(name, va);
+    }
+
+    // Insert il2cpp_resolve_icall if found via binary scan
+    if let Some(rva) = resolve_icall_rva {
+        let va = (base as i64 + rva as i64) as usize;
+        table.insert("il2cpp_resolve_icall", va);
+        info!("il2cpp_resolve_icall: VA={:#x} RVA={:#x} ✅", va, rva);
+    } else {
+        warn!("il2cpp_resolve_icall not found via binary scan — will try runtime scanner later");
     }
 
     info!("Mapped {} IL2CPP API functions", table.len());
@@ -141,6 +154,82 @@ fn find_il2cpp_init_rva(macho: &MachOFile64<LittleEndian>, _data: &[u8]) -> Opti
         }
     }
 
+    None
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Signature scan: find il2cpp_resolve_icall RVA
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Find `il2cpp_resolve_icall` by scanning `Behaviour::get_enabled` bytecode
+/// in the Mach-O binary.
+///
+/// Strategy:
+/// 1. Find `"UnityEngine.Behaviour::get_enabled()\0"` in `__cstring`
+/// 2. Scan `__text` for ADRP+ADD that computes exactly that string address
+/// 3. The next BL after that ADRP+ADD = `il2cpp_resolve_icall`
+fn find_resolve_icall_rva(macho: &MachOFile64<LittleEndian>) -> Option<u64> {
+    use object::{Object, ObjectSection};
+
+    let cstring_sec = macho.section_by_name("__cstring")?;
+    let cstring_data = cstring_sec.data().ok()?;
+    let cstring_base = cstring_sec.address();
+
+    let needle = b"UnityEngine.Behaviour::get_enabled()\0";
+    let offset_in_sec = cstring_data
+        .windows(needle.len())
+        .position(|w| w == needle)?;
+    let string_addr = cstring_base + offset_in_sec as u64;
+    let string_page = string_addr & !0xFFF;
+    let string_page_off = string_addr & 0xFFF;
+
+    info!("resolve_icall: string at vmaddr {:#x} (page {:#x} + {:#x})",
+        string_addr, string_page, string_page_off);
+
+    let text_sec = macho.section_by_name("__text")?;
+    let text_data = text_sec.data().ok()?;
+    let text_base = text_sec.address();
+    let words: &[u32] = bytemuck_cast_u32(text_data);
+
+    let mut page_hits = 0u32;
+
+    for (i, &w) in words.iter().enumerate() {
+        if !is_adrp(w) { continue; }
+        let pc = text_base + (i as u64) * 4;
+        let page = adrp_target_page(w, pc);
+        if page != string_page { continue; }
+
+        page_hits += 1;
+
+        // Next instruction must be ADD #imm12
+        let Some(&add_w) = words.get(i + 1) else { continue };
+        if !is_add_imm12(add_w) { continue; }
+
+        // Verify ADRP Rd == ADD Rn (same register)
+        let adrp_rd = w & 0x1F;
+        let add_rn = (add_w >> 5) & 0x1F;
+        if adrp_rd != add_rn { continue; }
+
+        // Verify ADD imm12 matches the page offset of our string
+        let add_imm = ((add_w >> 10) & 0xFFF) as u64;
+        if add_imm != string_page_off { continue; }
+
+        info!("resolve_icall: ADRP+ADD match at vmaddr {:#x} (Rd=x{})",
+            pc, adrp_rd);
+
+        // Find the next BL instruction
+        for j in (i + 2)..(i + 16).min(words.len()) {
+            let Some(&next_w) = words.get(j) else { break };
+            if is_bl(next_w) {
+                let bl_pc = text_base + (j as u64) * 4;
+                let target = bl_target_rva(next_w, bl_pc);
+                info!("resolve_icall: BL at {:#x} → target {:#x}", bl_pc, target);
+                return Some(target);
+            }
+        }
+    }
+
+    warn!("resolve_icall: no ADRP+ADD+BL match found (page hits: {})", page_hits);
     None
 }
 
