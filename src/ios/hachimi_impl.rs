@@ -10,9 +10,7 @@ pub fn is_il2cpp_lib(filename: &str) -> bool {
         || filename.ends_with("libil2cpp.dylib")
 }
 
-/// Whether Stage 5 logic has been executed (by hook or by poll thread).
-static STAGE5_DONE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+
 
 /// Called by `hook::on_image_added` when `UnityFramework` is detected.
 ///
@@ -63,34 +61,6 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
                 error!("il2cpp_init NOT in resolver map — hooking will not fire");
                 error!("═══ STAGE 4: FAILED ═══");
             }
-
-            // ═══ STAGE 4.5: FALLBACK POLL THREAD ═══
-            // On iOS, il2cpp_init typically runs BEFORE our dyld callback,
-            // so the hook above will never fire. This poll thread waits for
-            // Unity to finish initializing, then runs post-init directly.
-            info!("═══ STAGE 4.5: Starting fallback poll thread ═══");
-            std::thread::spawn(|| {
-                // Wait 10 seconds for Unity to fully start up.
-                // il2cpp_init has already been called by this point.
-                info!("[poll] Waiting 10s for Unity to fully start up...");
-                std::thread::sleep(std::time::Duration::from_secs(10));
-
-                // If hook already fired (unlikely but possible), skip.
-                if STAGE5_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-                    info!("[poll] Stage 5 already completed via hook — exiting");
-                    return;
-                }
-
-                info!("[poll] Hook did not fire — running post-init from poll thread");
-
-                // Atomically claim Stage 5
-                if STAGE5_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    info!("[poll] Race: Stage 5 already done — exiting");
-                    return;
-                }
-
-                unsafe { run_post_il2cpp_init(); }
-            });
         }
     }
 }
@@ -123,28 +93,20 @@ unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char
     let result = orig(domain_name);
     info!("Original il2cpp_init returned: {}", result);
 
-    // Atomically claim Stage 5
-    if !STAGE5_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        run_post_il2cpp_init();
-    } else {
-        info!("Stage 5 already completed by poll thread — skipping");
-    }
+    // Run post-init stages
+    post_il2cpp_init();
 
     result
 }
 
-/// Shared post-init logic for Stages 5, 5.5, 6.
-/// Called either from the hook or from the fallback poll thread.
-unsafe fn run_post_il2cpp_init() {
-    info!("═══ STAGE 5: POST-INIT ═══");
-
+/// Post-init logic: Stages 5, 5.5, 6.
+unsafe fn post_il2cpp_init() {
     info!("[post-init] symbols::init()...");
     crate::il2cpp::symbols::init();
     info!("[post-init] symbols::init() OK");
 
     info!("[post-init] on_hooking_finished()...");
     crate::core::Hachimi::instance().on_hooking_finished();
-    info!("[post-init] on_hooking_finished() OK");
     info!("═══ STAGE 5: DONE ═══");
 
     // ═══ STAGE 5.5: FIND il2cpp_resolve_icall VIA BL-SCAN ═══
