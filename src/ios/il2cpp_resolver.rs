@@ -201,6 +201,17 @@ fn find_resolve_icall_rva(macho: &MachOFile64<LittleEndian>) -> Option<u64> {
 
         page_hits += 1;
 
+        // Diagnostic: log first 3 page hits for debugging
+        if page_hits <= 3 {
+            let Some(&next_insn) = words.get(i + 1) else { continue };
+            let is_add = is_add_imm12(next_insn);
+            let add_imm = if is_add { ((next_insn >> 10) & 0xFFF) as u64 } else { 0 };
+            let rd = w & 0x1F;
+            let rn = if is_add { (next_insn >> 5) & 0x1F } else { 0 };
+            info!("resolve_icall: page hit #{} at {:#x}: next={:#010x} is_add={} imm={:#x} rd={} rn={} expect_off={:#x}",
+                page_hits, pc, next_insn, is_add, add_imm, rd, rn, string_page_off);
+        }
+
         // Next instruction must be ADD #imm12
         let Some(&add_w) = words.get(i + 1) else { continue };
         if !is_add_imm12(add_w) { continue; }

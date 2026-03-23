@@ -10,9 +10,7 @@ pub fn is_il2cpp_lib(filename: &str) -> bool {
         || filename.ends_with("libil2cpp.dylib")
 }
 
-/// Whether post-init logic has been executed (by hook or by deferred thread).
-static STAGE5_DONE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+
 
 /// Called by `hook::on_image_added` when `UnityFramework` is detected.
 ///
@@ -66,23 +64,6 @@ pub fn on_il2cpp_loaded(header_addr: usize, slide: isize) {
             if il2cpp_init_addr != 0 {
                 info!("il2cpp_init found at {:#x}", il2cpp_init_addr);
                 install_il2cpp_init_hook(il2cpp_init_addr);
-
-                // On iOS, il2cpp_init typically runs BEFORE our dyld callback,
-                // so the hook above will likely never fire.
-                // Spawn a deferred thread to run post-init after Unity settles.
-                // If the hook DOES fire, STAGE5_DONE prevents double execution.
-                std::thread::spawn(|| {
-                    info!("[deferred] Waiting 5s for Unity to settle...");
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-
-                    if STAGE5_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                        info!("[deferred] Stage 5 already done via hook — skipping");
-                        return;
-                    }
-
-                    info!("[deferred] Hook did not fire — running post-init");
-                    unsafe { post_il2cpp_init(); }
-                });
             } else {
                 error!("il2cpp_init NOT in resolver map — hooking will not fire");
                 error!("═══ STAGE 4: FAILED ═══");
@@ -119,13 +100,8 @@ unsafe extern "C" fn hooked_il2cpp_init(domain_name: *const std::os::raw::c_char
     let result = orig(domain_name);
     info!("Original il2cpp_init returned: {}", result);
 
-    // Run post-init stages (only if deferred thread hasn't already)
-    if !STAGE5_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        info!("[hook] Running post-init from hook");
-        post_il2cpp_init();
-    } else {
-        info!("[hook] Stage 5 already completed by deferred thread — skipping");
-    }
+    // Run post-init stages
+    post_il2cpp_init();
 
     result
 }
