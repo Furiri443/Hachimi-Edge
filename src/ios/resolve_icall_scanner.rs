@@ -55,6 +55,7 @@ pub unsafe fn resolve() -> Option<usize> {
     // We know it's somewhere near the function (within ±4GiB for ADRP).
     // Scan each ADRP+ADD pair to reconstruct the address they compute,
     // then check if that address points to our needle string.
+    for i in 0..MAX_INSNS {
         let insn0 = code[i];
         if !is_adrp(insn0) { continue; }
         
