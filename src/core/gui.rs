@@ -565,7 +565,7 @@ impl Gui {
                 if is_landscape { orientation_ratio * Hachimi::instance().config.load().windows.gui_landscape_ratio } else { 1.0 }
             }
 
-            #[cfg(target_os = "android")]
+            #[cfg(not(target_os = "windows"))]
             { 1.0 }
         };
 
