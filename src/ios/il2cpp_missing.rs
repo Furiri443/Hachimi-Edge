@@ -7,7 +7,7 @@
 //!
 //! **This file only compiles on `target_os = "ios"`.**
 
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_void};
 use crate::il2cpp::types::*;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -133,40 +133,89 @@ pub unsafe extern "C" fn hachimi_ios_il2cpp_class_is_inited(klass: *const Il2Cpp
     (*k).is_initialized()
 }
 
-/// `il2cpp_class_get_method_from_name` — linear scan through `klass->methods`.
+/// Locate `Class::GetMethodFromName` (and thus `il2cpp_class_get_method_from_name`)
+/// via a binary signature scan at runtime.
 ///
-/// Source: `Class::GetMethodFromName(klass, name, argsCount)` (il2cpp-api.cpp:332)
-/// The VM implementation iterates `klass->method_count` methods and compares
-/// `method->name` and `method->parameters_count`.
-#[no_mangle]
-pub unsafe extern "C" fn hachimi_ios_il2cpp_class_get_method_from_name(
-    klass: *mut Il2CppClass,
-    name:  *const c_char,
-    args_count: c_int,
-) -> *const MethodInfo {
-    if klass.is_null() || name.is_null() { return std::ptr::null(); }
+/// # Algorithm
+/// 1. Read the `B` instruction at `get_methods_va` (`il2cpp_class_get_methods`) and
+///    decode its target to obtain the address of `Class::GetMethods`.
+/// 2. Binary-search `fn_starts` (sorted VAs from LC_FUNCTION_STARTS) to locate
+///    `Class::GetMethods`.
+/// 3. Walk forward from that index, checking each function's first three instructions
+///    for the `Class::GetMethodFromName` prologue:
+///    ```
+///    MOV w?, #0      (MOVZ w?, #0)
+///    MOV x?, #0      (MOVZ x?, #0)
+///    B   <target>
+///    ```
+///
+/// Returns the virtual address of `Class::GetMethodFromName`, or `None` on failure.
+///
+/// # Safety
+/// Reads from live mapped memory; the caller must ensure the image remains loaded.
+pub unsafe fn scan_class_get_method_from_name(
+    get_methods_va: usize,
+    fn_starts: &[usize],
+) -> Option<usize> {
+    // Step 1 — follow B at il2cpp_class_get_methods → Class::GetMethods
+    let insn0 = std::ptr::read_unaligned(get_methods_va as *const u32);
+    let class_get_methods_va = decode_b(get_methods_va, insn0)?;
+    info!("scan_get_method_from_name: Class::GetMethods @ {:#x}", class_get_methods_va);
 
-    let k = klass as *mut RawKlass;
-    // Walk both the class and its parent chain exactly like Class::GetMethodFromName
-    let mut cur = k;
-    while !cur.is_null() {
-        let count = (*cur).method_count as usize;
-        let methods = (*cur).methods;
-        if !methods.is_null() {
-            for i in 0..count {
-                let m = *methods.add(i);
-                if m.is_null() { continue; }
-                let m = m as *const RawMethodInfo;
-                // Compare name
-                if libc::strcmp((*m).name, name) != 0 { continue; }
-                // args_count == -1 means "any arity"
-                if args_count >= 0 && (*m).parameters_count as c_int != args_count { continue; }
-                return m as *const MethodInfo;
-            }
-        }
-        cur = (*cur).parent;
+    // Step 2 — locate Class::GetMethods in the (sorted) function-starts table
+    let idx = fn_starts.partition_point(|&va| va < class_get_methods_va);
+    if idx >= fn_starts.len() || fn_starts[idx] != class_get_methods_va {
+        warn!("scan_get_method_from_name: Class::GetMethods not found in LC_FUNCTION_STARTS");
+        return None;
     }
-    std::ptr::null()
+    info!("scan_get_method_from_name: Class::GetMethods at fn_starts[{}]", idx);
+
+    // Step 3 — scan forward for the Class::GetMethodFromName prologue
+    const MAX_SEARCH: usize = 128;
+    for &fn_va in fn_starts[idx + 1..].iter().take(MAX_SEARCH) {
+        let i0 = std::ptr::read_unaligned(fn_va as *const u32);
+        let i1 = std::ptr::read_unaligned((fn_va + 4) as *const u32);
+        let i2 = std::ptr::read_unaligned((fn_va + 8) as *const u32);
+
+        if is_movz_w_zero(i0) && is_movz_x_zero(i1) && is_b(i2) {
+            info!("scan_get_method_from_name: Class::GetMethodFromName @ {:#x}", fn_va);
+            return Some(fn_va);
+        }
+    }
+
+    warn!("scan_get_method_from_name: signature not found in {} functions after Class::GetMethods",
+        MAX_SEARCH);
+    None
+}
+
+// ── ARM64 helpers (local to this scan) ───────────────────────────────────────
+
+/// `MOVZ w?, #0, LSL #0` — sf=0, opc=01, 100101, hw=00, imm16=0, Rd=any
+#[inline]
+fn is_movz_w_zero(insn: u32) -> bool {
+    (insn & 0xFFFFFFE0) == 0x52800000
+}
+
+/// `MOVZ x?, #0, LSL #0` — sf=1, opc=01, 100101, hw=00, imm16=0, Rd=any
+#[inline]
+fn is_movz_x_zero(insn: u32) -> bool {
+    (insn & 0xFFFFFFE0) == 0xD2800000
+}
+
+/// Unconditional `B`: bits[31:26] = 0b000101
+#[inline]
+fn is_b(insn: u32) -> bool {
+    (insn >> 26) == 0x05
+}
+
+/// Decode a `B` instruction at `pc`; returns the branch target address.
+#[inline]
+fn decode_b(pc: usize, insn: u32) -> Option<usize> {
+    if !is_b(insn) { return None; }
+    let imm26 = (insn & 0x03FF_FFFF) as u64;
+    let shift = 64 - 26;
+    let signed_off = ((imm26 << shift) as i64) >> shift; // sign-extend 26 bits
+    Some((pc as i64).wrapping_add(signed_off * 4) as usize)
 }
 
 /// `il2cpp_class_is_assignable_from` — walk `oklass->typeHierarchy`.
@@ -311,8 +360,6 @@ pub fn missing_fn_table() -> Vec<(&'static str, usize)> {
     vec![
         ("il2cpp_class_is_inited",
             hachimi_ios_il2cpp_class_is_inited as usize),
-        ("il2cpp_class_get_method_from_name",
-            hachimi_ios_il2cpp_class_get_method_from_name as usize),
         ("il2cpp_class_is_assignable_from",
             hachimi_ios_il2cpp_class_is_assignable_from as usize),
         ("il2cpp_field_set_value",

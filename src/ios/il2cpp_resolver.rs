@@ -84,6 +84,22 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
         table.insert(name, va);
     }
 
+    // ── Step 4.5: locate Class::GetMethodFromName via signature scan ──────
+    if let Some(&get_methods_va) = table.get("il2cpp_class_get_methods") {
+        // SAFETY: image remains mapped for the lifetime of the process.
+        match unsafe { super::il2cpp_missing::scan_class_get_method_from_name(get_methods_va, &fn_starts) } {
+            Some(va) => {
+                table.insert("il2cpp_class_get_method_from_name", va);
+                info!("il2cpp_class_get_method_from_name: VA={:#x} (binary scan) ✅", va);
+            }
+            None => {
+                warn!("il2cpp_class_get_method_from_name not found via binary scan");
+            }
+        }
+    } else {
+        warn!("il2cpp_class_get_methods not resolved; skipping Class::GetMethodFromName scan");
+    }
+
     // Insert il2cpp_resolve_icall if found via binary scan
     if let Some(rva) = resolve_icall_rva {
         let va = (base as i64 + rva as i64) as usize;
