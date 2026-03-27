@@ -218,7 +218,7 @@ fn find_resolve_icall_rva(macho: &MachOFile64<LittleEndian>) -> Option<u64> {
         return None;
     }
 
-    let text_sec = macho.section_by_name("__text")?;
+    let text_sec = macho.section_by_name("il2cpp")?;
     let text_data = text_sec.data().ok()?;
     let text_base = text_sec.address();
     let words: &[u32] = bytemuck_cast_u32(text_data);
