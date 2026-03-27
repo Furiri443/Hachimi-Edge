@@ -10,7 +10,6 @@ pub mod symbols_impl;
 pub mod utils;
 pub mod il2cpp_resolver;
 pub mod il2cpp_missing;
-pub mod resolve_icall_scanner;
 
 mod main;
 
