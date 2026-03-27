@@ -316,6 +316,16 @@ pub unsafe extern "C" fn hachimi_ios_il2cpp_field_static_set_value(
     std::ptr::copy_nonoverlapping(value as *const u8, dest, 8);
 }
 
+/// `il2cpp_runtime_object_init` — delegates to `il2cpp_runtime_object_init_exception`
+/// with a NULL exception pointer.
+///
+/// Source: `il2cpp_runtime_object_init(obj)` in il2cpp-api.cpp calls
+/// `Runtime::ObjectInit(obj, nullptr)`.
+#[no_mangle]
+pub unsafe extern "C" fn hachimi_ios_il2cpp_runtime_object_init(obj: *mut Il2CppObject) {
+    crate::il2cpp::api::il2cpp_runtime_object_init_exception(obj, std::ptr::null_mut());
+}
+
 /// `il2cpp_runtime_class_init` — trigger .cctor if not already initialized.
 ///
 /// On iOS we rely on the fact that `il2cpp_object_new` already calls this
@@ -368,6 +378,8 @@ pub fn missing_fn_table() -> Vec<(&'static str, usize)> {
             hachimi_ios_il2cpp_field_static_get_value as usize),
         ("il2cpp_field_static_set_value",
             hachimi_ios_il2cpp_field_static_set_value as usize),
+        ("il2cpp_runtime_object_init",
+            hachimi_ios_il2cpp_runtime_object_init as usize),
         ("il2cpp_runtime_class_init",
             hachimi_ios_il2cpp_runtime_class_init as usize),
         ("il2cpp_thread_get_all_attached_threads",
