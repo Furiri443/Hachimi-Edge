@@ -139,9 +139,15 @@ fn find_il2cpp_init_rva(macho: &MachOFile64<LittleEndian>, _data: &[u8]) -> Opti
         let computed_page = adrp_target_page(w, adrp_va);
         if computed_page != string_va_page { continue; }
 
-        // Check the next instruction is an ADD
+        // Check the next instruction is an ADD whose register and immediate
+        // exactly match the ADRP destination and the string's page offset.
         let Some(&add_w) = words.get(i + 1) else { continue };
         if !is_add_imm12(add_w) { continue; }
+        let adrp_rd = w & 0x1F;
+        let add_rn  = (add_w >> 5) & 0x1F;
+        let add_imm = ((add_w >> 10) & 0xFFF) as u64;
+        let string_page_off = string_rva & 0xFFF;
+        if add_rn != adrp_rd || add_imm != string_page_off { continue; }
 
         // Walk forward at most 8 instructions to find BL
         for j in (i + 2)..(i + 10).min(words.len()) {
