@@ -18,6 +18,7 @@ use object::endian::LittleEndian as LE;
 use object::macho::MachHeader64;
 use object::read::macho::MachOFile64;
 use object::LittleEndian;
+use super::arm64;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Public API
@@ -122,60 +123,96 @@ pub fn resolve(header_addr: usize, slide: isize) -> Result<FnvHashMap<&'static s
 fn find_il2cpp_init_rva(macho: &MachOFile64<LittleEndian>, _data: &[u8]) -> Option<u64> {
     use object::{Object, ObjectSection};
 
-    let cstring_sec = macho.section_by_name("__cstring").or_else(|| {
-        // Some builds merge cstrings into __TEXT,__text — fall back to full scan
-        None
-    })?;
+    let cstring_sec = match macho.section_by_name("__cstring") {
+        Some(s) => s,
+        None => { error!("find_il2cpp_init_rva: __cstring section not found"); return None; }
+    };
 
-    let cstring_data = cstring_sec.data().ok()?;
-    let cstring_base_rva = cstring_sec.address(); // RVA of start of section
+    let cstring_data = match cstring_sec.data() {
+        Ok(d) => d,
+        Err(e) => { error!("find_il2cpp_init_rva: __cstring data error: {:?}", e); return None; }
+    };
+    let cstring_base_rva = cstring_sec.address();
+    info!("find_il2cpp_init_rva: __cstring at RVA={:#x} size={}", cstring_base_rva, cstring_data.len());
 
-    // Find "IL2CPP Root Domain\0"
     let needle = b"IL2CPP Root Domain\0";
-    let offset_in_sec = cstring_data
-        .windows(needle.len())
-        .position(|w| w == needle)?;
-    let string_rva = cstring_base_rva + offset_in_sec as u64;
-    let string_va_page = string_rva & !0xFFF; // page address for ADRP matching
+    let offset_in_sec = match cstring_data.windows(needle.len()).position(|w| w == needle) {
+        Some(o) => o,
+        None => { error!("find_il2cpp_init_rva: needle not found in __cstring"); return None; }
+    };
+    let string_rva      = cstring_base_rva + offset_in_sec as u64;
+    let string_va_page  = string_rva & !0xFFF;
+    let string_page_off = string_rva & 0xFFF;
+    info!("find_il2cpp_init_rva: string RVA={:#x} page={:#x} off={:#x}",
+        string_rva, string_va_page, string_page_off);
 
-    // Search __TEXT,__text for the ADRP+ADD+BL sequence that loads this string
-    let text_sec = macho.section_by_name("__text")?;
-    let text_data = text_sec.data().ok()?;
+    let text_sec = match macho.section_by_name("__text") {
+        Some(s) => s,
+        None => { error!("find_il2cpp_init_rva: __text section not found"); return None; }
+    };
+    let text_data = match text_sec.data() {
+        Ok(d) => d,
+        Err(e) => { error!("find_il2cpp_init_rva: __text data error: {:?}", e); return None; }
+    };
     let text_base_rva = text_sec.address();
+    info!("find_il2cpp_init_rva: __text at RVA={:#x} size={}", text_base_rva, text_data.len());
 
-    // Disassemble 4-byte words looking for:
-    //   ADRP Xn, page_of_string  (encodes the page VA)
-    //   ADD  Xn, Xn, #offset_in_page
-    //   BL   <il2cpp_init>
+    let cs = match arm64::Disasm::new() {
+        Some(c) => c,
+        None => { error!("find_il2cpp_init_rva: Capstone failed to initialise"); return None; }
+    };
+    info!("find_il2cpp_init_rva: Capstone OK — scanning {} words for ADRP page {:#x}",
+        text_data.len() / 4, string_va_page);
+
     let words: &[u32] = bytemuck_cast_u32(text_data);
+    let mut adrp_candidates = 0u32;
+    let mut page_hits = 0u32;
+    let mut add_hits = 0u32;
 
     for (i, &w) in words.iter().enumerate() {
-        if !is_adrp(w) { continue; }
-        let adrp_va = text_base_rva + (i as u64) * 4;
-        let computed_page = adrp_target_page(w, adrp_va);
-        if computed_page != string_va_page { continue; }
+        if (w & 0x9F000000) != 0x90000000 { continue; }
+        adrp_candidates += 1;
 
-        // Check the next instruction is an ADD whose register and immediate
-        // exactly match the ADRP destination and the string's page offset.
-        let Some(&add_w) = words.get(i + 1) else { continue };
-        if !is_add_imm12(add_w) { continue; }
-        let adrp_rd = w & 0x1F;
-        let add_rn  = (add_w >> 5) & 0x1F;
-        let add_imm = ((add_w >> 10) & 0xFFF) as u64;
-        let string_page_off = string_rva & 0xFFF;
-        if add_rn != adrp_rd || add_imm != string_page_off { continue; }
+        let offset = i * 4;
+        let pc     = text_base_rva + offset as u64;
 
-        // Walk forward at most 8 instructions to find BL
-        for j in (i + 2)..(i + 10).min(words.len()) {
-            let Some(&bl_w) = words.get(j) else { break };
-            if is_bl(bl_w) {
-                let bl_va = text_base_rva + (j as u64) * 4;
-                let target_rva = bl_target_rva(bl_w, bl_va);
-                return Some(target_rva);
+        let insns = match cs.disasm_count(&text_data[offset..], pc, 10) { Some(v) => v, None => continue };
+        let window: Vec<_> = insns.iter().collect();
+
+        let adrp = match window.first() { Some(v) => v, None => continue };
+        if !cs.is_adrp(adrp) { continue; }
+        let (adrp_rd, page) = match cs.adrp_ops(adrp) { Some(v) => v, None => continue };
+        if page != string_va_page { continue; }
+        page_hits += 1;
+        info!("find_il2cpp_init_rva: ADRP page hit at RVA={:#x}", pc);
+
+        let add = match window.get(1) { Some(v) => v, None => continue };
+        if !cs.is_add(add) {
+            info!("find_il2cpp_init_rva:   next insn is not ADD (mnemonic={:?})", add.mnemonic());
+            continue;
+        }
+        let (add_rn, add_imm) = match cs.add_rn_imm(add) { Some(v) => v, None => continue };
+        if add_rn != adrp_rd || add_imm != string_page_off {
+            info!("find_il2cpp_init_rva:   ADD mismatch: rn_match={} imm={:#x} want={:#x}",
+                add_rn == adrp_rd, add_imm, string_page_off);
+            continue;
+        }
+        add_hits += 1;
+        info!("find_il2cpp_init_rva:   ADRP+ADD matched — searching window for BL");
+
+        for insn in &window[2..] {
+            if cs.is_bl(insn) {
+                if let Some(target) = cs.branch_target(insn) {
+                    info!("find_il2cpp_init_rva:   BL at RVA={:#x} → target={:#x}", insn.address(), target);
+                    return Some(target);
+                }
             }
         }
+        info!("find_il2cpp_init_rva:   no BL found in window after ADD");
     }
 
+    error!("find_il2cpp_init_rva: scan complete — ADRP candidates={} page_hits={} add_hits={} no match",
+        adrp_candidates, page_hits, add_hits);
     None
 }
 
@@ -221,52 +258,51 @@ fn find_resolve_icall_rva(macho: &MachOFile64<LittleEndian>) -> Option<u64> {
     let text_sec = macho.section_by_name("il2cpp")?;
     let text_data = text_sec.data().ok()?;
     let text_base = text_sec.address();
-    let words: &[u32] = bytemuck_cast_u32(text_data);
 
+    let cs = arm64::Disasm::new()?;
     let mut page_hits = 0u32;
 
+    let words: &[u32] = bytemuck_cast_u32(text_data);
     for (i, &w) in words.iter().enumerate() {
-        if !is_adrp(w) { continue; }
-        let pc = text_base + (i as u64) * 4;
-        let page = adrp_target_page(w, pc);
-        
-        // Does this ADRP point to any of our string instances?
-        let matching_instance = string_matches.iter().find(|(sp, _)| *sp == page);
-        let Some(&(_, string_page_off)) = matching_instance else { continue };
+        if (w & 0x9F000000) != 0x90000000 { continue; } // ADRP pre-filter
 
+        let offset = i * 4;
+        let pc     = text_base + offset as u64;
+
+        // Decode ADRP + up to 25 following instructions (ADD may not be adjacent).
+        let insns = match cs.disasm_count(&text_data[offset..], pc, 26) { Some(v) => v, None => continue };
+        let window: Vec<_> = insns.iter().collect();
+
+        let adrp = match window.first() { Some(v) => v, None => continue };
+        if !cs.is_adrp(adrp) { continue; }
+        let (adrp_rd, page) = match cs.adrp_ops(adrp) { Some(v) => v, None => continue };
+
+        let matching = string_matches.iter().find(|(sp, _)| *sp == page);
+        let Some(&(_, string_page_off)) = matching else { continue };
         page_hits += 1;
 
-        // Look ahead up to 10 instructions for the matching ADD
-        let adrp_rd = w & 0x1F;
-        let mut found_add = false;
-        let mut add_j = i + 1;
-
-        for j in (i + 1)..(i + 10).min(words.len()) {
-            let next_w = words[j];
-            if is_add_imm12(next_w) {
-                let add_rn = (next_w >> 5) & 0x1F;
-                let add_imm = ((next_w >> 10) & 0xFFF) as u64;
-                if add_rn == adrp_rd && add_imm == string_page_off {
-                    found_add = true;
-                    add_j = j;
+        // Find the ADD in the next 10 instructions that uses adrp_rd and the correct offset.
+        let mut add_idx: Option<usize> = None;
+        for (j, insn) in window[1..].iter().enumerate().take(10) {
+            if !cs.is_add(insn) { continue; }
+            if let Some((rn, imm)) = cs.add_rn_imm(insn) {
+                if rn == adrp_rd && imm == string_page_off {
+                    add_idx = Some(j + 1); // offset into `window`
                     break;
                 }
             }
         }
 
-        if !found_add { continue; }
+        let add_idx = match add_idx { Some(v) => v, None => continue };
+        info!("resolve_icall: ADRP+ADD match at vmaddr {:#x}", pc);
 
-        info!("resolve_icall: ADRP+ADD match at vmaddr {:#x} (Rd=x{})",
-            pc, adrp_rd);
-
-        // Find the next BL instruction after the ADD
-        for j in (add_j + 1)..(add_j + 16).min(words.len()) {
-            let next_w = words[j];
-            if is_bl(next_w) {
-                let bl_pc = text_base + (j as u64) * 4;
-                let target = bl_target_rva(next_w, bl_pc);
-                info!("resolve_icall: BL at {:#x} → target {:#x}", bl_pc, target);
-                return Some(target);
+        // Find the next BL after the ADD.
+        for insn in window[add_idx + 1..].iter().take(15) {
+            if cs.is_bl(insn) {
+                if let Some(target) = cs.branch_target(insn) {
+                    info!("resolve_icall: BL at {:#x} → target {:#x}", insn.address(), target);
+                    return Some(target);
+                }
             }
         }
     }
@@ -397,51 +433,6 @@ unsafe fn image_as_slice(header_addr: usize) -> &'static [u8] {
     // UnityFramework is ~133 MiB on iOS 2.24.x; use 512 MiB to be safe.
     const MAX_IMAGE_SIZE: usize = 512 * 1024 * 1024;
     std::slice::from_raw_parts(header_addr as *const u8, MAX_IMAGE_SIZE)
-}
-
-// AArch64 instruction helpers ─────────────────────────────────────────────────
-
-/// Returns `true` if `insn` is an ADRP instruction (bits [31:23] = 1_0000_0).
-#[inline]
-fn is_adrp(insn: u32) -> bool {
-    (insn & 0x9F000000) == 0x90000000
-}
-
-/// Returns the target page VA of an ADRP instruction executed at `pc`.
-#[inline]
-fn adrp_target_page(insn: u32, pc: u64) -> u64 {
-    // immhi = insn[23:5], immlo = insn[30:29]
-    let immlo = ((insn >> 29) & 0x3) as i64;
-    let immhi = (((insn >> 5) & 0x7FFFF) as i64) << 2;
-    let imm = sign_extend((immhi | immlo) as u64, 21) << 12;
-    ((pc & !0xFFF) as i64).wrapping_add(imm) as u64
-}
-
-/// Returns `true` if `insn` is an `ADD Xn, Xm, #imm12` (64-bit, shift=0).
-#[inline]
-fn is_add_imm12(insn: u32) -> bool {
-    (insn & 0xFF800000) == 0x91000000
-}
-
-/// Returns `true` if `insn` is a `BL` instruction.
-#[inline]
-fn is_bl(insn: u32) -> bool {
-    (insn & 0xFC000000) == 0x94000000
-}
-
-/// Compute the target RVA of a BL instruction at `pc`.
-#[inline]
-fn bl_target_rva(insn: u32, pc: u64) -> u64 {
-    let imm26 = (insn & 0x03FFFFFF) as i64;
-    let offset = sign_extend((imm26 << 2) as u64, 28);
-    (pc as i64).wrapping_add(offset) as u64
-}
-
-/// Sign-extend a `bits`-wide value stored in a `u64`.
-#[inline]
-fn sign_extend(val: u64, bits: u32) -> i64 {
-    let shift = 64 - bits;
-    ((val << shift) as i64) >> shift
 }
 
 /// Decode an unsigned ULEB128 integer; returns `(value, bytes_consumed)`.

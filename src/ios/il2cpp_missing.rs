@@ -157,12 +157,17 @@ pub unsafe fn scan_class_get_method_from_name(
     get_methods_va: usize,
     fn_starts: &[usize],
 ) -> Option<usize> {
-    // Step 1 — follow B at il2cpp_class_get_methods → Class::GetMethods
-    let insn0 = std::ptr::read_unaligned(get_methods_va as *const u32);
-    let class_get_methods_va = decode_b(get_methods_va, insn0)?;
+    let cs = super::arm64::Disasm::new()?;
+
+    // Step 1 — follow the B at il2cpp_class_get_methods to reach Class::GetMethods.
+    let b_bytes = std::slice::from_raw_parts(get_methods_va as *const u8, 4);
+    let b_insns = cs.disasm_count(b_bytes, get_methods_va as u64, 1)?;
+    let b_insn  = b_insns.iter().next()?;
+    if !cs.is_b(&b_insn) { return None; }
+    let class_get_methods_va = cs.branch_target(&b_insn)? as usize;
     info!("scan_get_method_from_name: Class::GetMethods @ {:#x}", class_get_methods_va);
 
-    // Step 2 — locate Class::GetMethods in the (sorted) function-starts table
+    // Step 2 — locate Class::GetMethods in the (sorted) function-starts table.
     let idx = fn_starts.partition_point(|&va| va < class_get_methods_va);
     if idx >= fn_starts.len() || fn_starts[idx] != class_get_methods_va {
         warn!("scan_get_method_from_name: Class::GetMethods not found in LC_FUNCTION_STARTS");
@@ -170,14 +175,33 @@ pub unsafe fn scan_class_get_method_from_name(
     }
     info!("scan_get_method_from_name: Class::GetMethods at fn_starts[{}]", idx);
 
-    // Step 3 — scan forward for the Class::GetMethodFromName prologue
+    // Step 3 — scan forward for the Class::GetMethodFromName prologue:
+    //   MOVZ w?, #0
+    //   MOVZ x?, #0
+    //   B    <target>
     const MAX_SEARCH: usize = 128;
-    for &fn_va in fn_starts[idx + 1..].iter().take(MAX_SEARCH) {
-        let i0 = std::ptr::read_unaligned(fn_va as *const u32);
-        let i1 = std::ptr::read_unaligned((fn_va + 4) as *const u32);
-        let i2 = std::ptr::read_unaligned((fn_va + 8) as *const u32);
+    for (search_i, &fn_va) in fn_starts[idx + 1..].iter().take(MAX_SEARCH).enumerate() {
+        let bytes  = std::slice::from_raw_parts(fn_va as *const u8, 12);
+        let insns  = match cs.disasm_count(bytes, fn_va as u64, 3) { Some(v) => v, None => continue };
+        let window: Vec<_> = insns.iter().collect();
+        if window.len() < 3 { continue; }
 
-        if is_movz_w_zero(i0) && is_movz_x_zero(i1) && is_b(i2) {
+        // Log the first 10 candidates so we can see the actual prologue patterns.
+        if search_i < 10 {
+            let i0 = window[0].mnemonic().unwrap_or("?");
+            let i1 = window[1].mnemonic().unwrap_or("?");
+            let i2 = window[2].mnemonic().unwrap_or("?");
+            let o0 = window[0].op_str().unwrap_or("?");
+            let o1 = window[1].op_str().unwrap_or("?");
+            let o2 = window[2].op_str().unwrap_or("?");
+            info!("scan[{}] {:#x}: `{} {}` / `{} {}` / `{} {}`",
+                search_i, fn_va, i0, o0, i1, o1, i2, o2);
+        }
+
+        if cs.is_movz_wreg_zero(&window[0])
+            && cs.is_movz_xreg_zero(&window[1])
+            && cs.is_b(&window[2])
+        {
             info!("scan_get_method_from_name: Class::GetMethodFromName @ {:#x}", fn_va);
             return Some(fn_va);
         }
@@ -186,36 +210,6 @@ pub unsafe fn scan_class_get_method_from_name(
     warn!("scan_get_method_from_name: signature not found in {} functions after Class::GetMethods",
         MAX_SEARCH);
     None
-}
-
-// ── ARM64 helpers (local to this scan) ───────────────────────────────────────
-
-/// `MOVZ w?, #0, LSL #0` — sf=0, opc=01, 100101, hw=00, imm16=0, Rd=any
-#[inline]
-fn is_movz_w_zero(insn: u32) -> bool {
-    (insn & 0xFFFFFFE0) == 0x52800000
-}
-
-/// `MOVZ x?, #0, LSL #0` — sf=1, opc=01, 100101, hw=00, imm16=0, Rd=any
-#[inline]
-fn is_movz_x_zero(insn: u32) -> bool {
-    (insn & 0xFFFFFFE0) == 0xD2800000
-}
-
-/// Unconditional `B`: bits[31:26] = 0b000101
-#[inline]
-fn is_b(insn: u32) -> bool {
-    (insn >> 26) == 0x05
-}
-
-/// Decode a `B` instruction at `pc`; returns the branch target address.
-#[inline]
-fn decode_b(pc: usize, insn: u32) -> Option<usize> {
-    if !is_b(insn) { return None; }
-    let imm26 = (insn & 0x03FF_FFFF) as u64;
-    let shift = 64 - 26;
-    let signed_off = ((imm26 << shift) as i64) >> shift; // sign-extend 26 bits
-    Some((pc as i64).wrapping_add(signed_off * 4) as usize)
 }
 
 /// `il2cpp_class_is_assignable_from` — walk `oklass->typeHierarchy`.

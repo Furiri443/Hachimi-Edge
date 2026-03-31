@@ -8,6 +8,7 @@ pub mod interceptor_impl;
 pub mod log_impl;
 pub mod symbols_impl;
 pub mod utils;
+pub mod arm64;
 pub mod il2cpp_resolver;
 pub mod il2cpp_missing;
 
