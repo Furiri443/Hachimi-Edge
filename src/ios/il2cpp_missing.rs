@@ -351,13 +351,21 @@ pub unsafe extern "C" fn hachimi_ios_il2cpp_thread_get_all_attached_threads(
     std::ptr::null_mut()
 }
 
-/// `il2cpp_resolve_icall` — not safely implementable without the icall table.
 #[no_mangle]
-pub unsafe extern "C" fn hachimi_ios_il2cpp_resolve_icall(
-    _name: *const c_char,
-) -> Il2CppMethodPointer {
-    warn!("iOS: il2cpp_resolve_icall not implemented — returning null");
-    0
+pub unsafe extern "C" fn hachimi_ios_il2cpp_string_new_utf16(
+    text: *const u16,
+    len: i32,
+) -> *mut Il2CppString {
+    if text.is_null() || len < 0 {
+        return std::ptr::null_mut();
+    }
+
+    let utf16_slice = std::slice::from_raw_parts(text, len as usize);
+    let rust_string = String::from_utf16_lossy(utf16_slice);
+
+    let c_str = std::ffi::CString::new(rust_string).unwrap();
+
+    crate::il2cpp::api::il2cpp_string_new(c_str.as_ptr())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -384,8 +392,7 @@ pub fn missing_fn_table() -> Vec<(&'static str, usize)> {
             hachimi_ios_il2cpp_runtime_class_init as usize),
         ("il2cpp_thread_get_all_attached_threads",
             hachimi_ios_il2cpp_thread_get_all_attached_threads as usize),
-        // NOTE: il2cpp_resolve_icall is NOT listed here.
-        // It is discovered at binary level by il2cpp_resolver (Stage 3)
-        // via signature scan of "UnityEngine.Behaviour::get_enabled()".
+        ("il2cpp_string_new_utf16",
+            hachimi_ios_il2cpp_string_new_utf16 as usize),
     ]
 }
