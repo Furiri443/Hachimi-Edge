@@ -115,35 +115,6 @@ unsafe fn post_il2cpp_init() {
     info!("[post-init] on_hooking_finished()...");
     crate::core::Hachimi::instance().on_hooking_finished();
     info!("═══ STAGE 5: DONE ═══");
-
-    // ═══ STAGE 6: FPS UNLOCK TEST ═══
-    std::thread::spawn(|| {
-        info!("═══ STAGE 6: FPS UNLOCK TEST ═══");
-        info!("Waiting 5s for Unity to settle...");
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
-        info!("Resolving set_targetFrameRate...");
-        let func_addr = crate::il2cpp::api::il2cpp_resolve_icall(
-            c"UnityEngine.Application::set_targetFrameRate(System.Int32)".as_ptr(),
-        );
-
-        if func_addr != 0 {
-            info!("set_targetFrameRate resolved at {:#x}", func_addr);
-            info!("Calling unlock_fps_on_main_thread(240)...");
-            super::unlock_fps_on_main_thread(240);
-
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let pkg = super::game_impl::get_package_name();
-            let region = super::game_impl::get_region(&pkg);
-            super::show_alert("Hachimi Edge",
-                &format!("Injection OK!\nFPS → 240\nPkg: {}\nRegion: {}", pkg, region));
-            info!("═══ STAGE 6: DONE ═══");
-        } else {
-            error!("set_targetFrameRate resolved to 0 — icall not found");
-            super::show_alert("Hachimi Error", "set_targetFrameRate resolved to 0");
-            error!("═══ STAGE 6: FAILED ═══");
-        }
-    });
 }
 
 fn install_il2cpp_init_hook(addr: usize) {
