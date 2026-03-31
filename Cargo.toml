@@ -68,7 +68,7 @@ egui-wgpu = "0.33"
 objc2 = "0.5"
 # #[ctor] for constructor entry point (runs before game main())
 ctor = "0.2"
-capstone = { version = "0.14.0", default-features = false, features = ["full", "std", "arch_arm64"] }
+capstone = { version = "0.14.0", default-features = false, features = ["std", "arch_arm64"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windebug_logger = "0.1"
