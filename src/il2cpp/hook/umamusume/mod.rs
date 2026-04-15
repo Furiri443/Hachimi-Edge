@@ -70,6 +70,9 @@ mod LowResolutionCamera;
 pub mod TweenAnimationTimelineComponent;
 pub mod TweenAnimationTimelineData;
 pub mod TweenAnimationTimelineSheetData;
+mod PartsSingleModeChoiceRewardTextElementViewModel;
+mod PartsCommonHeaderTitle;
+pub mod StoryParamChangeEffect;
 
 pub fn init() {
     get_assembly_image_or_return!(image, "umamusume.dll");
@@ -145,4 +148,7 @@ pub fn init() {
     TweenAnimationTimelineComponent::init(image);
     TweenAnimationTimelineData::init(image);
     TweenAnimationTimelineSheetData::init(image);
+    PartsSingleModeChoiceRewardTextElementViewModel::init(image);
+    PartsCommonHeaderTitle::init(image);
+    StoryParamChangeEffect::init(image);
 }

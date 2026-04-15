@@ -471,7 +471,13 @@ pub enum Language {
     Indonesian,
 
     #[serde(rename = "es")]
-    Spanish
+    Spanish,
+
+    #[serde(rename = "pt-br")]
+    BPortuguese,
+
+    #[serde(rename = "fil")]
+    Filipino
 }
 
 impl Default for Language {
@@ -487,6 +493,10 @@ impl Default for Language {
             Self::Indonesian
         } else if locale.starts_with("es") {
             Self::Spanish
+        } else if locale.starts_with("pt-br") {
+            Self::BPortuguese
+        } else if locale.starts_with("fil") {
+            Self::Filipino
         } else {
             Self::English
         }
@@ -500,7 +510,9 @@ impl Language {
         Self::SChinese.choice(),
         Self::Vietnamese.choice(),
         Self::Indonesian.choice(),
-        Self::Spanish.choice()
+        Self::Spanish.choice(),
+        Self::BPortuguese.choice(),
+        Self::Filipino.choice()
     ];
 
     pub fn set_locale(&self) {
@@ -514,7 +526,9 @@ impl Language {
             Language::SChinese => "zh-cn",
             Language::Vietnamese => "vi",
             Language::Indonesian => "id",
-            Language::Spanish => "es"
+            Language::Spanish => "es",
+            Language::BPortuguese => "pt-br",
+            Language::Filipino => "fil"
         }
     }
 
@@ -525,7 +539,9 @@ impl Language {
             Language::SChinese => "简体中文",
             Language::Vietnamese => "Tiếng Việt",
             Language::Indonesian => "Bahasa Indonesia",
-            Language::Spanish => "Español (ES)"
+            Language::Spanish => "Español (ES)",
+            Language::BPortuguese => "Português (Brasil)",
+            Language::Filipino => "Filipino"
         }
     }
 
