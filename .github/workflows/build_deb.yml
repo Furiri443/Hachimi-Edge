@@ -13,8 +13,233 @@ permissions:
   contents: read
 
 jobs:
+  build-ios:
+    runs-on: macos-latest
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[ci skip]')
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          key: aarch64-apple-ios
+
+      - name: Setup and Patch Dependencies
+        run: |
+          pushd ..
+          git clone --revision 44cdd653e2317d300fb8a6c9c36b03f23991e803 https://github.com/emilk/egui.git
+          cd egui
+          sed -i '' 's/ui.set_min_width(ui.available_width());/\/\/ ui.set_min_width(ui.available_width());/' crates/egui/src/containers/combo_box.rs
+          popd
+
+          echo -e "\negui = { path = '../egui/crates/egui' }" >> Cargo.toml
+          echo "egui_extras = { path = '../egui/crates/egui_extras' }" >> Cargo.toml
+
+      - name: Install Rust toolchain + iOS target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Install build tools
+        run: brew install ldid cmake
+
+      - name: Build libdobby.a for iOS (arm64)
+        run: |
+          git clone --depth 1 https://github.com/jmpews/Dobby.git /tmp/dobby
+
+          TARGET_FILE="/tmp/dobby/source/Backend/UserMode/ExecMemory/code-patch-tool-darwin.cc"
+
+          perl -pi -e 's/PUBLIC int DobbyCodePatch/int DobbyCodePatch_Standard/g' "$TARGET_FILE"
+
+          cat << 'EOF' >> "$TARGET_FILE"
+
+          #include <mach-o/dyld.h>
+          #include <sys/sysctl.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <dlfcn.h>
+          #include "PlatformUnifiedInterface/ExecMemory/ClearCacheTool.h"
+
+          extern "C" {
+              __attribute__((noinline,optnone,naked))
+              void BreakJITWrite(void* dest, void* src, size_t bytes) {
+                  __asm__("brk #0x70 \n ret");
+              }
+          }
+
+          static bool is_macos_hardware() {
+              bool is_mac = false;
+              void* objc_lib = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY);
+              if (!objc_lib) return false;
+
+              typedef void* (*objc_getClass_t)(const char*);
+              typedef void* (*sel_registerName_t)(const char*);
+              typedef void* (*objc_msgSend_ptr_t)(void*, void*);
+              typedef bool  (*objc_msgSend_bool_t)(void*, void*);
+              typedef void* (*object_getClass_t)(void*);
+              typedef bool  (*class_respondsToSelector_t)(void*, void*);
+
+              void* sym_getClass = dlsym(objc_lib, "objc_getClass");
+              void* sym_selReg = dlsym(objc_lib, "sel_registerName");
+              void* sym_msgSend = dlsym(objc_lib, "objc_msgSend");
+              void* sym_objGetClass = dlsym(objc_lib, "object_getClass");
+              void* sym_responds = dlsym(objc_lib, "class_respondsToSelector");
+
+              if (sym_getClass && sym_selReg && sym_msgSend && sym_objGetClass && sym_responds) {
+                  auto my_objc_getClass = (objc_getClass_t)sym_getClass;
+                  auto my_sel_registerName = (sel_registerName_t)sym_selReg;
+                  auto msgSend_ptr = (objc_msgSend_ptr_t)sym_msgSend;
+                  auto msgSend_bool = (objc_msgSend_bool_t)sym_msgSend;
+                  auto my_object_getClass = (object_getClass_t)sym_objGetClass;
+                  auto my_class_respondsToSelector = (class_respondsToSelector_t)sym_responds;
+
+                  void* cls = my_objc_getClass("NSProcessInfo");
+                  if (cls) {
+                      void* processInfo = msgSend_ptr(cls, my_sel_registerName("processInfo"));
+                      if (processInfo) {
+                          void* sel_isMac = my_sel_registerName("isiOSAppOnMac");
+                          void* obj_cls = my_object_getClass(processInfo);
+
+                          if (my_class_respondsToSelector(obj_cls, sel_isMac)) {
+                              is_mac = msgSend_bool(processInfo, sel_isMac);
+                          }
+                      }
+                  }
+              }
+
+              dlclose(objc_lib);
+              return is_mac;
+          }
+
+          PUBLIC int DobbyCodePatch(void *address, uint8_t *buffer, uint32_t buffer_size) {
+              static int use_jit_bypass = -1;
+
+              if (use_jit_bypass == -1) {
+                  use_jit_bypass = 0;
+
+                  bool is_mac = is_macos_hardware();
+
+                  bool is_ios26_plus = false;
+                  char os_version[32] = {0};
+                  size_t size = sizeof(os_version);
+                  if (sysctlbyname("kern.osproductversion", os_version, &size, NULL, 0) == 0) {
+                      int major = atoi(os_version);
+                      if (major >= 26) {
+                          is_ios26_plus = true;
+                      }
+                  }
+
+                  if (!is_mac && is_ios26_plus) {
+                      use_jit_bypass = 1;
+                  }
+              }
+
+              if (use_jit_bypass == 1) {
+                  if (address == nullptr || buffer == nullptr || buffer_size == 0) return -1;
+
+                  size_t page_size = sysconf(_SC_PAGESIZE);
+                  addr_t patch_page = ALIGN_FLOOR(address, page_size);
+
+                  if ((addr_t)address + buffer_size > patch_page + page_size) {
+                      void *address_a = address;
+                      uint8_t *buffer_a = buffer;
+                      uint32_t buffer_size_a = (patch_page + page_size - (addr_t)address);
+                      if (DobbyCodePatch(address_a, buffer_a, buffer_size_a) == -1) return -1;
+
+                      void *address_b = (void *)((addr_t)address + buffer_size_a);
+                      uint8_t *buffer_b = buffer + buffer_size_a;
+                      uint32_t buffer_size_b = buffer_size - buffer_size_a;
+                      return DobbyCodePatch(address_b, buffer_b, buffer_size_b);
+                  }
+
+                  BreakJITWrite(address, buffer, buffer_size);
+                  ClearCache(address, (void *)((addr_t)address + buffer_size));
+                  return 0;
+              }
+
+              return DobbyCodePatch_Standard(address, buffer, buffer_size);
+          }
+          EOF
+
+          IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+
+          cmake -S /tmp/dobby -B /tmp/dobby-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT="${IOS_SDK}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="14.0" \
+            -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+            -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
+            -DPlugin.Darwin.HideLibrary=OFF \
+            -DPlugin.Darwin.MachOReWrite=OFF \
+            -DDOBBY_GENERATE_SHARED=OFF \
+            -DDOBBY_DEBUG=OFF
+
+          cmake --build /tmp/dobby-build --config Release -- -j$(sysctl -n hw.ncpu)
+
+          LIB=$(find /tmp/dobby-build -name "libdobby.a" | head -1)
+          if [ -z "$LIB" ]; then
+            echo "ERROR: libdobby.a not found after build"
+            find /tmp/dobby-build -name "*.a"
+            exit 1
+          fi
+          echo "Built: $LIB"
+
+          cargo fetch --target aarch64-apple-ios 2>/dev/null || true
+
+          DOBBY_SYS_DIR=$(find ~/.cargo/git/checkouts -path "*/dobby-sys*/dobby_static" 2>/dev/null | head -1)
+          if [ -n "$DOBBY_SYS_DIR" ]; then
+            mkdir -p "${DOBBY_SYS_DIR}/darwin/arm64"
+            cp "$LIB" "${DOBBY_SYS_DIR}/darwin/arm64/libdobby.a"
+            echo "Injected into: ${DOBBY_SYS_DIR}/darwin/arm64/"
+          else
+            echo "WARNING: dobby-sys checkout not found in git cache, trying registry"
+            DOBBY_SYS_DIR=$(find ~/.cargo/registry/src -path "*/dobby-sys*/dobby_static" 2>/dev/null | head -1)
+            if [ -n "$DOBBY_SYS_DIR" ]; then
+              mkdir -p "${DOBBY_SYS_DIR}/darwin/arm64"
+              cp "$LIB" "${DOBBY_SYS_DIR}/darwin/arm64/libdobby.a"
+              echo "Injected into registry: ${DOBBY_SYS_DIR}/darwin/arm64/"
+            else
+              echo "ERROR: could not find dobby-sys source directory"
+              find ~/.cargo -name "dobby_static" 2>/dev/null
+              exit 1
+            fi
+          fi
+
+      - name: Build Hachimi for iOS (aarch64)
+        run: |
+          cargo build \
+            --target aarch64-apple-ios \
+            --release \
+            --target-dir build
+        env:
+          HACHIMI_IGNORE_DIRTY: "true"
+          IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+          CXXSTDLIB: "c++"
+          RUSTFLAGS: >-
+            -C link-arg=-Wl,-install_name,@rpath/libhachimi.dylib
+
+      - name: Fake-sign the dylib
+        run: |
+          DYLIB="build/aarch64-apple-ios/release/libhachimi.dylib"
+          ldid -S "${DYLIB}"
+          echo "Signed: $(ls -lh ${DYLIB})"
+
+      - name: Upload iOS dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-dylib
+          path: build/aarch64-apple-ios/release/libhachimi.dylib
+          if-no-files-found: error
+
   build-deb:
     runs-on: ubuntu-latest
+    needs: build-ios
 
     environment:
       name: BuildiOS
@@ -25,11 +250,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download iOS dylib artifact
-        uses: dawidd6/action-download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: build_ios.yml
-          workflow_conclusion: success
           name: ios-dylib
           path: artifacts/
 
