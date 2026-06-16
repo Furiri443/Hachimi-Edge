@@ -258,7 +258,9 @@ jobs:
       - name: Start Tailscale
         uses: tailscale/github-action@v4
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:cicd
           hostname: gha-deb-${{ github.run_id }}
 
       - name: 📌 Read version from Cargo.toml
