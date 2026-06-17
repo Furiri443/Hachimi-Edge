@@ -1,5 +1,5 @@
 use std::os::raw::c_void;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use objc2::{msg_send, sel, Encode, Encoding};
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::ffi::{class_getInstanceMethod, method_setImplementation, IMP};
@@ -9,6 +9,31 @@ static mut ORIG_SEND_EVENT: Option<IMP> = None;
 static mut ORIG_PRESSES_BEGAN: Option<IMP> = None;
 static LAST_MENU_TOGGLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SCROLL_HOOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SEND_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static PRESSES_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_INPUT_LOG_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn should_log_input(now_ms: u64, event_count: u64) -> bool {
+    if event_count <= 12 {
+        return true;
+    }
+
+    let last = LAST_INPUT_LOG_AT_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < 1_500 {
+        return false;
+    }
+
+    LAST_INPUT_LOG_AT_MS
+        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -78,6 +103,14 @@ extern "C" fn handle_scroll(_target: *mut AnyObject, _sel: Sel, recognizer: *mut
 
                         if translation.x != 0.0 || translation.y != 0.0 {
                             let delta = egui::Vec2::new(translation.x as f32, translation.y as f32) * 1.5;
+                            debug!(
+                                "iOS GUI input: scroll state={} pos=({:.1},{:.1}) delta=({:.1},{:.1})",
+                                state,
+                                pos.x,
+                                pos.y,
+                                delta.x,
+                                delta.y
+                            );
 
                             gui.input.events.push(egui::Event::PointerMoved(pos));
                             gui.input.events.push(egui::Event::MouseWheel {
@@ -104,6 +137,9 @@ extern "C" fn should_recognize_simultaneously(
 
 extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut AnyObject) {
     unsafe {
+        let event_count = SEND_EVENT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let log_now = now_ms();
+        let log_this_event = should_log_input(log_now, event_count);
         let render_ready = crate::ios::gui_impl::render_hook::is_render_ready_for_input();
         let legacy_passthrough = crate::ios::gui_impl::render_hook::uses_legacy_compat_mode();
 
@@ -114,6 +150,13 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
         };
 
         if !is_window {
+            if log_this_event {
+                debug!(
+                    "iOS GUI input: sendEvent#{} non-window receiver={:p}, forwarding",
+                    event_count,
+                    self_obj
+                );
+            }
             if let Some(orig_imp) = ORIG_SEND_EVENT {
                 let orig_fn: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) = std::mem::transmute(orig_imp);
                 orig_fn(self_obj, sel, event);
@@ -149,6 +192,10 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
 
         let mut egui_wants_input = false;
         let mut has_native_ui_touch = false;
+        let mut touch_count = 0usize;
+        let mut main_view_touch_count = 0usize;
+        let mut last_touch_phase = -1isize;
+        let mut last_touch_pos = egui::pos2(0.0, 0.0);
 
         let event_type: isize = msg_send![event, type];
 
@@ -158,9 +205,11 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
             let mut touch: *mut AnyObject = msg_send![enumerator, nextObject];
 
             while !touch.is_null() {
+                touch_count += 1;
                 let phase: isize = msg_send![touch, phase];
                 let tap_count: usize = msg_send![touch, tapCount];
                 let view: *mut AnyObject = msg_send![touch, view];
+                last_touch_phase = phase;
 
                 if !view.is_null() {
                     let view_cls = object_getClass(view as *mut c_void);
@@ -171,6 +220,7 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
                     if !is_main_view {
                         has_native_ui_touch = true;
                     } else {
+                        main_view_touch_count += 1;
                         let location: CGPoint = msg_send![touch, locationInView: view];
                         let bounds: CGRect = msg_send![view, bounds];
 
@@ -183,6 +233,7 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
                                         (location.x / bounds.size.width) as f32 * screen_rect.width(),
                                         (location.y / bounds.size.height) as f32 * screen_rect.height()
                                     );
+                                    last_touch_pos = pos;
 
                                     let mut events = vec![];
 
@@ -237,10 +288,20 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
                                         let config = crate::core::Hachimi::instance().config.load();
 
                                         if !config.disable_gui && pos.x < corner_zone_size && pos.y < corner_zone_size {
+                                            debug!(
+                                                "iOS GUI input: triple-tap menu toggle pos=({:.1},{:.1})",
+                                                pos.x,
+                                                pos.y
+                                            );
                                             gui.toggle_menu();
                                             egui_wants_input = true;
                                         }
                                         else if config.hide_ingame_ui_hotkey && pos.x > (screen_rect.width() - corner_zone_size) && pos.y < corner_zone_size {
+                                            debug!(
+                                                "iOS GUI input: triple-tap game UI toggle pos=({:.1},{:.1})",
+                                                pos.x,
+                                                pos.y
+                                            );
                                             crate::il2cpp::symbols::Thread::main_thread().schedule(crate::core::Gui::toggle_game_ui);
                                             egui_wants_input = true;
                                         }
@@ -278,31 +339,59 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
                             LAST_MENU_TOGGLE.store(now, std::sync::atomic::Ordering::Relaxed);
                             gui.toggle_menu();
                             egui_wants_input = true;
+                            debug!("iOS GUI input: motion submenu event toggled menu");
                         }
                     }
                 }
             }
         }
 
-        if has_native_ui_touch || !egui_wants_input || !render_ready || legacy_passthrough {
+        let forward_to_app = has_native_ui_touch || !egui_wants_input || !render_ready || legacy_passthrough;
+        if log_this_event {
+            debug!(
+                "iOS GUI input: sendEvent#{} type={} touches={} main_touches={} last_phase={} last_pos=({:.1},{:.1}) render_ready={} legacy_passthrough={} egui_wants={} native_touch={} forward={}",
+                event_count,
+                event_type,
+                touch_count,
+                main_view_touch_count,
+                last_touch_phase,
+                last_touch_pos.x,
+                last_touch_pos.y,
+                render_ready,
+                legacy_passthrough,
+                egui_wants_input,
+                has_native_ui_touch,
+                forward_to_app
+            );
+        }
+
+        if forward_to_app {
             if let Some(orig_imp) = ORIG_SEND_EVENT {
                 let orig_fn: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) = std::mem::transmute(orig_imp);
                 orig_fn(self_obj, sel, event);
             }
+        } else if log_this_event {
+            debug!("iOS GUI input: sendEvent#{} consumed by egui", event_count);
         }
     }
 }
 
 extern "C" fn hooked_presses_began(self_obj: *mut AnyObject, sel: Sel, presses: *mut AnyObject, event: *mut AnyObject) {
     unsafe {
+        let event_count = PRESSES_EVENT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let log_now = now_ms();
+        let log_this_event = should_log_input(log_now, event_count);
         let render_ready = crate::ios::gui_impl::render_hook::is_render_ready_for_input();
         let legacy_passthrough = crate::ios::gui_impl::render_hook::uses_legacy_compat_mode();
         let enumerator: *mut AnyObject = msg_send![presses, objectEnumerator];
         let mut press: *mut AnyObject = msg_send![enumerator, nextObject];
 
         let mut egui_wants_input = false;
+        let mut press_count = 0usize;
+        let mut last_key_code = -1isize;
 
         while !press.is_null() {
+            press_count += 1;
             let phase: isize = msg_send![press, phase];
             let key: *mut AnyObject = msg_send![press, key];
 
@@ -317,16 +406,19 @@ extern "C" fn hooked_presses_began(self_obj: *mut AnyObject, sel: Sel, presses: 
 
                 if !is_empty_char {
                     let key_code: isize = msg_send![key, keyCode];
+                    last_key_code = key_code;
 
                     if let Some(gui_mutex) = crate::core::gui::INSTANCE.get() {
                         if let Ok(mut gui) = gui_mutex.lock() {
                             let config = crate::core::Hachimi::instance().config.load();
 
                             if key_code as i32 == config.ios.menu_open_key {
+                                debug!("iOS GUI input: hardware key toggled menu key_code={}", key_code);
                                 gui.toggle_menu();
                                 egui_wants_input = true;
                             }
                             else if config.hide_ingame_ui_hotkey && key_code as i32 == config.ios.hide_ingame_ui_hotkey_bind {
+                                debug!("iOS GUI input: hardware key toggled game UI key_code={}", key_code);
                                 crate::il2cpp::symbols::Thread::main_thread().schedule(crate::core::Gui::toggle_game_ui);
                                 egui_wants_input = true;
                             }
@@ -337,11 +429,27 @@ extern "C" fn hooked_presses_began(self_obj: *mut AnyObject, sel: Sel, presses: 
             press = msg_send![enumerator, nextObject];
         }
 
-        if !egui_wants_input || !render_ready || legacy_passthrough {
+        let forward_to_app = !egui_wants_input || !render_ready || legacy_passthrough;
+        if log_this_event {
+            debug!(
+                "iOS GUI input: pressesBegan#{} presses={} last_key={} render_ready={} legacy_passthrough={} egui_wants={} forward={}",
+                event_count,
+                press_count,
+                last_key_code,
+                render_ready,
+                legacy_passthrough,
+                egui_wants_input,
+                forward_to_app
+            );
+        }
+
+        if forward_to_app {
             if let Some(orig_imp) = ORIG_PRESSES_BEGAN {
                 let orig_fn: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject) = std::mem::transmute(orig_imp);
                 orig_fn(self_obj, sel, presses, event);
             }
+        } else if log_this_event {
+            debug!("iOS GUI input: pressesBegan#{} consumed by egui", event_count);
         }
     }
 }
@@ -395,7 +503,7 @@ pub fn init() {
 
             let orig = method_setImplementation(method, hooked_imp);
             ORIG_SEND_EVENT = Some(orig);
-            info!("iOS: UIWindow sendEvent: successfully swizzled with objc2");
+            info!("iOS: UIWindow sendEvent: successfully swizzled with objc2 has_orig={}", orig.is_some());
         } else {
             error!("iOS: Failed to get sendEvent: method");
         }
@@ -413,7 +521,7 @@ pub fn init() {
 
                 let orig = method_setImplementation(method, hooked_imp);
                 ORIG_PRESSES_BEGAN = Some(orig);
-                info!("iOS: UnityView pressesBegan:withEvent: successfully swizzled");
+                info!("iOS: UnityView pressesBegan:withEvent: successfully swizzled has_orig={}", orig.is_some());
             } else {
                 error!("iOS: Failed to get pressesBegan:withEvent: method from UnityView");
             }

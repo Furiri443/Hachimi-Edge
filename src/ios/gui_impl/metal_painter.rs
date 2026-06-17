@@ -138,10 +138,21 @@ impl MetalPainter {
         unsafe {
             let source_ns = ns_string(SHADER_SOURCE);
             let library: *mut AnyObject = msg_send![device, newLibraryWithSource: source_ns, options: std::ptr::null_mut::<AnyObject>(), error: std::ptr::null_mut::<*mut AnyObject>()];
-            if library.is_null() { return Err(Error::RuntimeError("Metal: Shader compilation failed".into())); }
+            if library.is_null() {
+                error!("iOS GUI Metal: newLibraryWithSource returned null");
+                return Err(Error::RuntimeError("Metal: Shader compilation failed".into()));
+            }
 
             let v_fn: *mut AnyObject = msg_send![library, newFunctionWithName: ns_string("vertex_main")];
             let f_fn: *mut AnyObject = msg_send![library, newFunctionWithName: ns_string("fragment_main")];
+            if v_fn.is_null() || f_fn.is_null() {
+                error!(
+                    "iOS GUI Metal: shader function missing vertex={:p} fragment={:p}",
+                    v_fn,
+                    f_fn
+                );
+                return Err(Error::RuntimeError("Metal: Shader function lookup failed".into()));
+            }
 
             let desc: *mut AnyObject = msg_send![objc2::class!(MTLRenderPipelineDescriptor), new];
             let _: () = msg_send![desc, setVertexFunction: v_fn];
@@ -181,11 +192,25 @@ impl MetalPainter {
             let _: () = msg_send![attach, setDestinationAlphaBlendFactor: 5_usize];
 
             let pipeline: *mut AnyObject = msg_send![device, newRenderPipelineStateWithDescriptor: desc, error: std::ptr::null_mut::<*mut AnyObject>()];
+            if pipeline.is_null() {
+                error!("iOS GUI Metal: newRenderPipelineStateWithDescriptor returned null");
+                return Err(Error::RuntimeError("Metal: Pipeline creation failed".into()));
+            }
 
             let s_desc: *mut AnyObject = msg_send![objc2::class!(MTLSamplerDescriptor), new];
             let _: () = msg_send![s_desc, setMinFilter: 1_usize];
             let _: () = msg_send![s_desc, setMagFilter: 1_usize];
             let sampler: *mut AnyObject = msg_send![device, newSamplerStateWithDescriptor: s_desc];
+            if sampler.is_null() {
+                error!("iOS GUI Metal: newSamplerStateWithDescriptor returned null");
+                return Err(Error::RuntimeError("Metal: Sampler creation failed".into()));
+            }
+
+            info!(
+                "iOS GUI Metal: painter initialized pipeline={:p} sampler={:p}",
+                pipeline,
+                sampler
+            );
 
             Ok(Self {
                 pipeline_state: MetalObject(pipeline),
@@ -230,6 +255,15 @@ impl MetalPainter {
                     ];
 
                     let texture: *mut AnyObject = msg_send![device, newTextureWithDescriptor: tex_desc];
+                    if texture.is_null() {
+                        error!(
+                            "iOS GUI Metal: newTextureWithDescriptor returned null id={:?} size={}x{}",
+                            id,
+                            patch_width,
+                            patch_height
+                        );
+                        continue;
+                    }
                     let region = MTLRegion {
                         origin: MTLOrigin { x: 0, y: 0, z: 0 },
                         size: MTLSize { width: patch_width, height: patch_height, depth: 1 },

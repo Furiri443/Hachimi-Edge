@@ -12,6 +12,9 @@ static ORIG_NEXT_DRAWABLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::nul
 static ORIG_PRESENT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
 static DRAWABLE_SWIZZLED: AtomicBool = AtomicBool::new(false);
 static PAINTED_FRAME_AT_MS: AtomicU64 = AtomicU64::new(0);
+static PRESENT_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+static PAINTED_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_RENDER_LOG_AT_MS: AtomicU64 = AtomicU64::new(0);
 static PRESENT_ORDER: OnceLock<PresentOrder> = OnceLock::new();
 
 static EGUI_COMMAND_QUEUE: AtomicPtr<AnyObject> = AtomicPtr::new(ptr::null_mut());
@@ -27,6 +30,21 @@ fn monotonic_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn should_log_ui(now_ms: u64, frame_count: u64) -> bool {
+    if frame_count <= 8 {
+        return true;
+    }
+
+    let last = LAST_RENDER_LOG_AT_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < 2_000 {
+        return false;
+    }
+
+    LAST_RENDER_LOG_AT_MS
+        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
 }
 
 fn ios_major_version() -> i32 {
@@ -64,6 +82,13 @@ fn present_order() -> PresentOrder {
             PresentOrder::GuiBeforePresent
         }
     })
+}
+
+fn present_order_label(order: PresentOrder) -> &'static str {
+    match order {
+        PresentOrder::GuiBeforePresent => "before-present",
+        PresentOrder::GuiAfterPresent => "legacy-after-present",
+    }
 }
 
 pub fn is_render_ready_for_input() -> bool {
@@ -104,10 +129,17 @@ extern "C" fn hooked_next_drawable(self_layer: *mut AnyObject, sel: Sel) -> *mut
                 queue = msg_send![device, newCommandQueue];
                 EGUI_COMMAND_QUEUE.store(queue, Ordering::Release);
                 info!("iOS: Created isolated Metal command queue for GUI");
+            } else {
+                debug!("iOS GUI: CAMetalLayer device is null in nextDrawable");
             }
         }
 
         let orig_ptr = ORIG_NEXT_DRAWABLE.load(Ordering::Relaxed);
+        if orig_ptr.is_null() {
+            error!("iOS GUI: original CAMetalLayer nextDrawable IMP is null");
+            return std::ptr::null_mut();
+        }
+
         let orig_fn: extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject = std::mem::transmute(orig_ptr);
         let drawable = orig_fn(self_layer, sel);
 
@@ -124,6 +156,8 @@ extern "C" fn hooked_next_drawable(self_layer: *mut AnyObject, sel: Sel) -> *mut
                 }
                 info!("iOS: CAMetalDrawable 'present' swizzled on the fly!");
                 DRAWABLE_SWIZZLED.store(true, Ordering::Relaxed);
+            } else {
+                error!("iOS GUI: failed to find CAMetalDrawable present method");
             }
         }
 
@@ -133,7 +167,20 @@ extern "C" fn hooked_next_drawable(self_layer: *mut AnyObject, sel: Sel) -> *mut
 
 extern "C" fn hooked_present(self_drawable: *mut AnyObject, sel: Sel) {
     unsafe {
-        let render_after_present = present_order() == PresentOrder::GuiAfterPresent;
+        let frame_count = PRESENT_FRAME_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let now_ms = monotonic_ms();
+        let order = present_order();
+        let render_after_present = order == PresentOrder::GuiAfterPresent;
+        let log_this_frame = should_log_ui(now_ms, frame_count);
+
+        if log_this_frame {
+            debug!(
+                "iOS GUI: present frame={} mode={} drawable={:p}",
+                frame_count,
+                present_order_label(order),
+                self_drawable
+            );
+        }
 
         if render_after_present {
             call_original_present(self_drawable, sel);
@@ -151,14 +198,34 @@ extern "C" fn hooked_present(self_drawable: *mut AnyObject, sel: Sel) {
                 if let Ok(mut gui) = gui_lock.lock() {
                     let width: usize = msg_send![texture, width];
                     let height: usize = msg_send![texture, height];
+                    let pixel_format: usize = msg_send![texture, pixelFormat];
                     gui.set_screen_size(width as i32, height as i32);
 
                     let full_output = gui.run();
 
                     let pixels_per_point = gui.context.pixels_per_point();
                     let screen_size = gui.context.screen_rect().size();
+                    let texture_set_count = full_output.textures_delta.set.len();
+                    let texture_free_count = full_output.textures_delta.free.len();
 
                     let primitives = gui.context.tessellate(full_output.shapes, pixels_per_point);
+                    let primitive_count = primitives.len();
+
+                    if log_this_frame {
+                        debug!(
+                            "iOS GUI: frame={} texture={}x{} pixel_format={} ppp={:.3} screen={:.1}x{:.1} primitives={} tex_delta=set:{} free:{}",
+                            frame_count,
+                            width,
+                            height,
+                            pixel_format,
+                            pixels_per_point,
+                            screen_size.x,
+                            screen_size.y,
+                            primitive_count,
+                            texture_set_count,
+                            texture_free_count
+                        );
+                    }
 
                     if let Some(painter) = gui.get_or_init_painter(device) {
                         let pass_class = objc2::class!(MTLRenderPassDescriptor);
@@ -185,15 +252,38 @@ extern "C" fn hooked_present(self_drawable: *mut AnyObject, sel: Sel) {
                             );
                             let _: () = msg_send![encoder, endEncoding];
                             PAINTED_FRAME_AT_MS.store(monotonic_ms(), Ordering::Release);
+                            let painted = PAINTED_FRAME_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                            if log_this_frame {
+                                debug!(
+                                    "iOS GUI: painted frame={} painted_count={} encoder={:p} cmd_buf={:p}",
+                                    frame_count,
+                                    painted,
+                                    encoder,
+                                    cmd_buf
+                                );
+                            }
+                        } else {
+                            error!("iOS GUI: renderCommandEncoderWithDescriptor returned null");
                         }
 
                         let _: () = msg_send![cmd_buf, commit];
                         if render_after_present {
                             let _: () = msg_send![cmd_buf, waitUntilScheduled];
+                            if log_this_frame {
+                                debug!("iOS GUI: waited until GUI command buffer scheduled");
+                            }
                         }
+                    } else if log_this_frame {
+                        error!("iOS GUI: MetalPainter is unavailable");
                     }
+                } else if log_this_frame {
+                    debug!("iOS GUI: failed to lock Gui mutex");
                 }
+            } else if log_this_frame {
+                error!("iOS GUI: drawable texture is null");
             }
+        } else if log_this_frame {
+            error!("iOS GUI: command queue is null");
         }
 
         if !render_after_present {
@@ -212,9 +302,10 @@ unsafe fn call_original_present(self_drawable: *mut AnyObject, sel: Sel) {
 
 pub fn init() {
     unsafe {
+        let major = ios_major_version();
         match present_order() {
-            PresentOrder::GuiBeforePresent => info!("iOS: GUI render mode = before present"),
-            PresentOrder::GuiAfterPresent => info!("iOS: GUI render mode = legacy after present"),
+            PresentOrder::GuiBeforePresent => info!("iOS: GUI render mode = before present (major={})", major),
+            PresentOrder::GuiAfterPresent => info!("iOS: GUI render mode = legacy after present (major={})", major),
         }
 
         let layer_class = AnyClass::get("CAMetalLayer").expect("Failed to find CAMetalLayer");
