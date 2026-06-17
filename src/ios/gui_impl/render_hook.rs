@@ -1,5 +1,8 @@
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicPtr, AtomicBool, Ordering};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicPtr, AtomicBool, AtomicU64, Ordering},
+};
 use std::ptr;
 use objc2::{msg_send, sel, Encode, Encoding};
 use objc2::runtime::{AnyClass, AnyObject, Sel};
@@ -8,8 +11,73 @@ use objc2::ffi::{class_getInstanceMethod, method_setImplementation, object_getCl
 static ORIG_NEXT_DRAWABLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
 static ORIG_PRESENT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
 static DRAWABLE_SWIZZLED: AtomicBool = AtomicBool::new(false);
+static PAINTED_FRAME_AT_MS: AtomicU64 = AtomicU64::new(0);
+static PRESENT_ORDER: OnceLock<PresentOrder> = OnceLock::new();
 
 static EGUI_COMMAND_QUEUE: AtomicPtr<AnyObject> = AtomicPtr::new(ptr::null_mut());
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum PresentOrder {
+    GuiBeforePresent,
+    GuiAfterPresent,
+}
+
+fn monotonic_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn ios_major_version() -> i32 {
+    unsafe {
+        let mut os_version = [0u8; 32];
+        let mut size = std::mem::size_of_val(&os_version);
+        if libc::sysctlbyname(
+            b"kern.osproductversion\0".as_ptr() as *const _,
+            os_version.as_mut_ptr() as *mut _,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0 {
+            return 0;
+        }
+
+        let version = std::ffi::CStr::from_ptr(os_version.as_ptr() as *const _).to_string_lossy();
+        version
+            .split('.')
+            .next()
+            .and_then(|major| major.parse().ok())
+            .unwrap_or(0)
+    }
+}
+
+fn present_order() -> PresentOrder {
+    *PRESENT_ORDER.get_or_init(|| {
+        // iOS 15-25 can reorder the isolated GUI command buffer behind the game's
+        // command buffer, making egui interactive but visually overwritten. Drawing
+        // after the original present is the compatibility fallback for those builds.
+        let major = ios_major_version();
+        if major > 0 && major < 26 {
+            PresentOrder::GuiAfterPresent
+        } else {
+            PresentOrder::GuiBeforePresent
+        }
+    })
+}
+
+pub fn is_render_ready_for_input() -> bool {
+    if !DRAWABLE_SWIZZLED.load(Ordering::Acquire) {
+        return false;
+    }
+
+    let painted_at = PAINTED_FRAME_AT_MS.load(Ordering::Acquire);
+    painted_at != 0 && monotonic_ms().saturating_sub(painted_at) < 1_000
+}
+
+pub fn uses_legacy_compat_mode() -> bool {
+    present_order() == PresentOrder::GuiAfterPresent
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -65,6 +133,12 @@ extern "C" fn hooked_next_drawable(self_layer: *mut AnyObject, sel: Sel) -> *mut
 
 extern "C" fn hooked_present(self_drawable: *mut AnyObject, sel: Sel) {
     unsafe {
+        let render_after_present = present_order() == PresentOrder::GuiAfterPresent;
+
+        if render_after_present {
+            call_original_present(self_drawable, sel);
+        }
+
         let queue = EGUI_COMMAND_QUEUE.load(Ordering::Acquire);
         if !queue.is_null() {
             let texture: *mut AnyObject = msg_send![self_drawable, texture];
@@ -110,24 +184,39 @@ extern "C" fn hooked_present(self_drawable: *mut AnyObject, sel: Sel) {
                                 primitives,
                             );
                             let _: () = msg_send![encoder, endEncoding];
+                            PAINTED_FRAME_AT_MS.store(monotonic_ms(), Ordering::Release);
                         }
 
                         let _: () = msg_send![cmd_buf, commit];
+                        if render_after_present {
+                            let _: () = msg_send![cmd_buf, waitUntilScheduled];
+                        }
                     }
                 }
             }
         }
 
-        let orig_present_ptr = ORIG_PRESENT.load(Ordering::Relaxed);
-        if !orig_present_ptr.is_null() {
-            let orig_fn: extern "C" fn(*mut AnyObject, Sel) = std::mem::transmute(orig_present_ptr);
-            orig_fn(self_drawable, sel);
+        if !render_after_present {
+            call_original_present(self_drawable, sel);
         }
+    }
+}
+
+unsafe fn call_original_present(self_drawable: *mut AnyObject, sel: Sel) {
+    let orig_present_ptr = ORIG_PRESENT.load(Ordering::Relaxed);
+    if !orig_present_ptr.is_null() {
+        let orig_fn: extern "C" fn(*mut AnyObject, Sel) = std::mem::transmute(orig_present_ptr);
+        orig_fn(self_drawable, sel);
     }
 }
 
 pub fn init() {
     unsafe {
+        match present_order() {
+            PresentOrder::GuiBeforePresent => info!("iOS: GUI render mode = before present"),
+            PresentOrder::GuiAfterPresent => info!("iOS: GUI render mode = legacy after present"),
+        }
+
         let layer_class = AnyClass::get("CAMetalLayer").expect("Failed to find CAMetalLayer");
         let next_drawable_sel = sel!(nextDrawable);
 

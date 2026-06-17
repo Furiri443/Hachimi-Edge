@@ -104,6 +104,9 @@ extern "C" fn should_recognize_simultaneously(
 
 extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut AnyObject) {
     unsafe {
+        let render_ready = crate::ios::gui_impl::render_hook::is_render_ready_for_input();
+        let legacy_passthrough = crate::ios::gui_impl::render_hook::uses_legacy_compat_mode();
+
         let is_window: bool = if let Some(ui_window_cls) = AnyClass::get("UIWindow") {
             msg_send![self_obj, isKindOfClass: ui_window_cls]
         } else {
@@ -243,7 +246,11 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
                                         }
                                     }
 
-                                    if gui.context.wants_pointer_input() || gui.context.is_pointer_over_area() || gui.is_consuming_input() {
+                                    if render_ready && (
+                                        gui.context.wants_pointer_input()
+                                        || gui.context.is_pointer_over_area()
+                                        || gui.is_consuming_input()
+                                    ) {
                                         egui_wants_input = true;
                                     }
                                 }
@@ -277,7 +284,7 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
             }
         }
 
-        if has_native_ui_touch || !egui_wants_input {
+        if has_native_ui_touch || !egui_wants_input || !render_ready || legacy_passthrough {
             if let Some(orig_imp) = ORIG_SEND_EVENT {
                 let orig_fn: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) = std::mem::transmute(orig_imp);
                 orig_fn(self_obj, sel, event);
@@ -288,6 +295,8 @@ extern "C" fn hooked_send_event(self_obj: *mut AnyObject, sel: Sel, event: *mut 
 
 extern "C" fn hooked_presses_began(self_obj: *mut AnyObject, sel: Sel, presses: *mut AnyObject, event: *mut AnyObject) {
     unsafe {
+        let render_ready = crate::ios::gui_impl::render_hook::is_render_ready_for_input();
+        let legacy_passthrough = crate::ios::gui_impl::render_hook::uses_legacy_compat_mode();
         let enumerator: *mut AnyObject = msg_send![presses, objectEnumerator];
         let mut press: *mut AnyObject = msg_send![enumerator, nextObject];
 
@@ -328,7 +337,7 @@ extern "C" fn hooked_presses_began(self_obj: *mut AnyObject, sel: Sel, presses: 
             press = msg_send![enumerator, nextObject];
         }
 
-        if !egui_wants_input {
+        if !egui_wants_input || !render_ready || legacy_passthrough {
             if let Some(orig_imp) = ORIG_PRESSES_BEGAN {
                 let orig_fn: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject) = std::mem::transmute(orig_imp);
                 orig_fn(self_obj, sel, presses, event);
